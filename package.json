@@ -1,0 +1,40 @@
+{
+  "name": "pi-hetzner-inference",
+  "version": "0.1.0",
+  "description": "Hetzner Experiments Platform Inference API for the pi coding agent: free open-weight models, live catalog discovery and rate-limit visibility",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "hetzner",
+    "inference",
+    "llm",
+    "openai-compatible"
+  ],
+  "files": [
+    "src/**/*.ts",
+    "scripts/**/*.mjs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "probe": "node scripts/probe.mjs"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.83.0",
+    "@types/node": ">=22",
+    "typebox": "^1.1.24",
+    "typescript": "^5.7.0"
+  }
+}
