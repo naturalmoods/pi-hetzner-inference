@@ -51,12 +51,23 @@ or `/model hetzner/...` inside a session. Commands:
 
 ## Models
 
-| Model | Context | Modalities | Architecture |
-| --- | --- | --- | --- |
-| `Kimi-K2.7-Code` | 262k | text + image | MoE 1T total / 32B active, code-tuned |
-| `GLM-5.2-NVFP4` | 512k | text | MoE 744B total / 40B active |
-| `DeepSeek-V4-Flash-0731` | 512k | text | MoE 304B total / 13B active |
-| `Qwen/Qwen3.6-35B-A3B-FP8` | 262k | text + image | MoE 35B total / 3B active |
+| Model | Context | Modalities | Agent loop | Architecture |
+| --- | --- | --- | --- | --- |
+| `Kimi-K2.7-Code` | 262k | text + image | yes | MoE 1T total / 32B active, code-tuned |
+| `DeepSeek-V4-Flash-0731` | 512k | text | yes | MoE 304B total / 13B active |
+| `Qwen/Qwen3.6-35B-A3B-FP8` | 262k | text + image | yes | MoE 35B total / 3B active |
+| `GLM-5.2-NVFP4` | 512k | text | untested | MoE 744B total / 40B active — see below |
+
+The context window is a *total* budget shared between input and output, which is what the API
+itself reports (`max_model_len=max_total_tokens`).
+
+**GLM-5.2-NVFP4 did not answer a one-word prompt within 60 seconds** when probed on 2026-08-11.
+It is registered because the API lists it, but treat its availability as unproven — this is an
+experimental platform. Re-check with:
+
+```bash
+node scripts/probe.mjs --model GLM-5.2-NVFP4 --timeout 300000
+```
 
 `/v1/models` returns ids only, so the metadata above lives in `src/catalog.ts` and is overlaid
 onto whatever the endpoint reports. An id this package does not recognise is still registered,
@@ -77,8 +88,10 @@ hetzner in 1.2M/10M · out 34k/200k (60s)
 The status line counts token usage pi observed in this session, including anything spent by
 `hetzner_ask`. Requests made with the same key from elsewhere are invisible to it. At 80% of
 either limit you get a warning with the time until the window frees up; on a 429 you get a
-notification saying pi is retrying and when. `/hetzner status` also reports any
-`x-ratelimit-*` / `Retry-After` headers the API sends, which is the authoritative source when present.
+notification saying pi is retrying and when.
+
+The API sent no `x-ratelimit-*` headers when probed, so the local window is the only signal
+available. If that changes, those headers are authoritative and `/hetzner status` shows them.
 
 ## `hetzner_ask` (opt-in)
 
@@ -116,25 +129,36 @@ instead of being shadowed by a stale cache. Startup performs no network I/O: the
 catalog is registered synchronously, and a refresh happens in the background only when the cache
 is stale.
 
-## Unverified behaviour
+## Measured behaviour
 
-The Hetzner documentation covers models, chat completions and image input. It says nothing about
-function calling, streaming usage, or base64 image input — all of which matter for a coding agent.
-`scripts/probe.mjs` measures them:
+The Hetzner documentation covers models, chat completions and image input, but says nothing about
+function calling, streaming usage or base64 image input — all of which decide whether a coding
+agent can use the service at all. `scripts/probe.mjs` measures them:
 
 ```bash
 HETZNER_INFERENCE_API_KEY=<token> npm run probe
+npm run probe -- --overflow          # also verifies pi's auto-compaction path (~2MB per model)
 ```
 
-It reports, per model: chat latency, whether `tools` / `tool_choice` are accepted and a tool call
-is actually emitted, whether a tool-result round trip replays, streaming and `stream_options`
-support, base64 `data:` image input, `max_completion_tokens` acceptance, `reasoning_content`
-presence, and any rate-limit headers. The verdict section states plainly whether the models can
-drive pi's agent loop or should be used through `hetzner_ask` instead.
+Results from 2026-08-11, on DeepSeek-V4-Flash, Qwen3.6-35B-A3B and Kimi-K2.7-Code
+(GLM-5.2-NVFP4 timed out before it could be measured):
 
-Until measured, `src/catalog.ts` is deliberately conservative: `reasoning: false` everywhere, plus
-compat flags that avoid OpenAI-only request fields (`system` instead of `developer`, `max_tokens`
-instead of `max_completion_tokens`, no strict function schemas, no grammar tools).
+| Capability | Result |
+| --- | --- |
+| `tools` accepted, tool call emitted | yes — all three |
+| Forced `tool_choice` | yes |
+| Tool-result round trip | yes |
+| Streaming | yes, with usage in the stream |
+| Base64 `data:` image input | Qwen and Kimi yes; DeepSeek rejects it as "not a multimodal model" |
+| `reasoning_content` | none of them |
+| `max_completion_tokens` | accepted (this package sends `max_tokens`) |
+| Rate-limit response headers | none sent |
+| First-token latency, trivial prompt | 0.9–1.3s |
+
+So `src/catalog.ts` sets `reasoning: false`, `supportsUsageInStreaming: true`, image input only on
+Qwen and Kimi, and keeps the remaining OpenAI-platform compat flags off (`system` instead of
+`developer`, `max_tokens`, no strict function schemas, no grammar tools) because those were not
+exercised and `false` is the behaviour that is known to work.
 
 To turn reasoning on for one model without patching the package, use `modelOverrides` in
 `~/.pi/agent/models.json` — it applies to extension-registered models:

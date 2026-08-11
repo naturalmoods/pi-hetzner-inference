@@ -5,9 +5,11 @@ User-facing instructions are in [README.md](./README.md).
 
 ## Goal
 
-Make the Hetzner Experiments Platform Inference API usable from pi as a **main agent model**,
-falling back to a **delegation tool** if the models turn out not to support function calling
-(unverified in Hetzner's documentation — see [Open questions](#open-questions)).
+Make the Hetzner Experiments Platform Inference API usable from pi as a **main agent model**, with
+a **delegation tool** as a secondary use. Function calling was the open risk — Hetzner does not
+document it — and `scripts/probe.mjs` confirmed on 2026-08-11 that `tools`, forced `tool_choice`
+and tool-result replay all work, so the main-model path is the primary one and `hetzner_ask` stays
+opt-in.
 
 - Base URL `https://inference.hetzner.com/api/v1`, OpenAI-compatible, `Authorization: Bearer`
 - Free during the experiment → `cost: 0` for every model
@@ -87,13 +89,18 @@ phase applies immediately, so a changed catalog needs no `/reload`.
 The cache stores **only ids**. Metadata always comes from the installed package version, so
 upgrading fixes a wrong context window immediately instead of waiting for a cache expiry.
 
-### Compat flags are conservative by default
+### Compat flags follow the probe, not guesswork
 
-`supportsDeveloperRole: false`, `supportsStore: false`, `supportsStrictMode: false`,
-`supportsOpenAIGrammarTools: false`, `maxTokensField: "max_tokens"` — the subset that every
-OpenAI-compatible server accepts. `reasoning: false` everywhere until the probe shows whether the
-hybrid models (DeepSeek V4, GLM 5.2, Kimi K2.7) expose `reasoning_content` and how thinking is
-toggled. Users can flip individual models via `modelOverrides` without patching the package.
+Measured on 2026-08-11: function calling and forced `tool_choice` work, tool results replay,
+streaming carries usage (`supportsUsageInStreaming: true`), no model returns `reasoning_content`
+(`reasoning: false`), DeepSeek rejects image content while Qwen and Kimi accept base64 `data:`
+URIs, and both `max_tokens` and `max_completion_tokens` are accepted. The rest
+(`supportsDeveloperRole`, `supportsStore`, `supportsStrictMode`, `supportsOpenAIGrammarTools`) stay
+`false`: they are OpenAI platform features that were not exercised, and `false` selects the
+behaviour known to work. Users can flip individual models via `modelOverrides` without patching.
+
+The probe also pinned the context windows from the server's own error text
+(`max_model_len=max_total_tokens=512000` / `262144`), confirming the documented numbers.
 
 ### Rate limits: visibility, not control
 
@@ -120,17 +127,22 @@ with another provider produces no noise. `/hetzner quiet` persists the opt-out.
   hidden and error-free without one
 - `npm run probe` — live capability matrix, see below
 
+## Resolved by the probe
+
+Function calling, streaming usage, base64 image input, real model ids (the documented table's
+display names are the actual ids, only Qwen carries an org prefix) and the context windows are all
+settled — see [Compat flags](#compat-flags-follow-the-probe-not-guesswork).
+
 ## Open questions
 
-1. **Function calling** — undocumented, and it decides whether these models can drive pi's agent
-   loop at all. `scripts/probe.mjs` checks that `tools` is accepted, that a tool call is emitted,
-   that `tool_choice` forcing works, and that a tool-result round trip replays. If it fails, the
-   README's emphasis moves to `hetzner_ask` and the tool should default to on.
-2. **Streaming usage** — if `stream_options: {include_usage: true}` is rejected or usage never
-   arrives in the stream, the budget window undercounts and should show an approximation marker.
-3. **Base64 images** — pi sends local images as `data:` URIs; Hetzner's examples only show public
-   URLs. If data URIs are rejected, drop `"image"` from those models' `input`.
-4. **Real model ids** — the documented table shows display names and only prefixes the Qwen entry.
-   `/v1/models` is the authority; the overlay regexes are prefix-tolerant for this reason.
-5. **Publishing** — `repository`/`homepage` are unset in `package.json` and should point at the
+1. **GLM-5.2-NVFP4 availability** — it did not answer a one-word prompt within 60s on 2026-08-11.
+   Registered because the API lists it, flagged in `/hetzner models`, and untested for everything
+   else. Re-run `node scripts/probe.mjs --model GLM-5.2-NVFP4 --timeout 300000`.
+2. **Context-overflow phrasing** — pi auto-compacts and retries only when it recognises the error
+   text. `npm run probe -- --overflow` sends a genuinely oversized prompt and reports whether the
+   message matches pi's patterns. If it does not, add a `message_end` normalizer that prefixes
+   `context_length_exceeded:` (scoped to this provider, and never to rate-limit errors).
+3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
+   ever appears, `cacheControlFormat` may become relevant.
+4. **Publishing** — `repository`/`homepage` are unset in `package.json` and should point at the
    public repo before `npm publish`.

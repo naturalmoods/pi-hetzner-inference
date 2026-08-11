@@ -27,24 +27,27 @@ export const RATE_LIMITS = {
 const FREE: ProviderModelConfig["cost"] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 /**
- * Conservative compat flags for a self-hosted OpenAI-compatible server.
+ * Compat flags for this deployment.
  *
- * These avoid OpenAI-only request fields that such servers reject:
- * - `developer` role is OpenAI-specific, `system` is universal.
- * - `store` is an OpenAI platform feature.
- * - strict function schemas and OpenAI grammar tools are not generally supported;
- *   turning them off falls back to plain function tools.
- * - `max_tokens` is accepted everywhere, `max_completion_tokens` is not.
+ * Measured with `scripts/probe.mjs` on 2026-08-11 against DeepSeek-V4-Flash,
+ * Qwen3.6-35B-A3B and Kimi-K2.7-Code (see README):
+ * - Function calling works: `tools`, forced `tool_choice`, and tool-result
+ *   replay all behave, so these models can drive pi's agent loop.
+ * - Streaming returns usage, hence `supportsUsageInStreaming`.
+ * - No model returns `reasoning_content`, so `reasoning` stays false. Turn it on
+ *   per model with `modelOverrides` in `~/.pi/agent/models.json` if that changes.
  *
- * Reasoning stays off until `scripts/probe.mjs` confirms how (and whether) the
- * deployment exposes thinking for the hybrid models. Users can turn it on per
- * model through `modelOverrides` in `~/.pi/agent/models.json` — see README.
+ * The remaining flags stay off because they are OpenAI platform features that
+ * were not verified here; `false` falls back to behaviour that is known to work.
+ * `max_completion_tokens` is also accepted, but `max_tokens` is what the probe
+ * exercised, so it is what we pin.
  */
 const COMPAT: ProviderModelConfig["compat"] = {
 	supportsDeveloperRole: false,
 	supportsStore: false,
 	supportsStrictMode: false,
 	supportsOpenAIGrammarTools: false,
+	supportsUsageInStreaming: true,
 	maxTokensField: "max_tokens",
 };
 
@@ -70,7 +73,17 @@ export interface ModelSpec {
 	note: string;
 }
 
-/** Documented catalog as of 2026-08. Order drives the display order. */
+/**
+ * Documented catalog as of 2026-08. Order drives the display order.
+ *
+ * Context windows are confirmed by the API itself: an over-large `max_tokens`
+ * request reports `max_model_len=max_total_tokens=512000` for DeepSeek and
+ * `262144` for Qwen and Kimi. Note that this is a *total* budget shared between
+ * input and output, which is why `maxTokens` stays well below it.
+ *
+ * Modalities are probe results, not guesses: DeepSeek rejects image content with
+ * "is not a multimodal model", while Qwen and Kimi accept base64 `data:` URIs.
+ */
 export const KNOWN_MODELS: readonly ModelSpec[] = [
 	{
 		id: "Kimi-K2.7-Code",
@@ -78,7 +91,7 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		match: /kimi-k2(\.7)?-code/i,
 		contextWindow: 262_144,
 		input: ["text", "image"],
-		note: "MoE 1T total / 32B active, code-tuned",
+		note: "MoE 1T total / 32B active, code-tuned; fastest to first token in probing",
 	},
 	{
 		id: "GLM-5.2-NVFP4",
@@ -86,7 +99,7 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		match: /glm-5(\.2)?/i,
 		contextWindow: 512_000,
 		input: ["text"],
-		note: "MoE 744B total / 40B active",
+		note: "MoE 744B total / 40B active; did not answer within 60s when probed on 2026-08-11",
 	},
 	{
 		id: "DeepSeek-V4-Flash-0731",
@@ -94,7 +107,7 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		match: /deepseek-v4-flash/i,
 		contextWindow: 512_000,
 		input: ["text"],
-		note: "MoE 304B total / 13B active",
+		note: "MoE 304B total / 13B active, text only",
 	},
 	{
 		id: "Qwen/Qwen3.6-35B-A3B-FP8",

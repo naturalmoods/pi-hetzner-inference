@@ -10,6 +10,8 @@
  * Usage:
  *   HETZNER_INFERENCE_API_KEY=... node scripts/probe.mjs
  *   node scripts/probe.mjs --token <token> --model Kimi-K2.7-Code --json report.json
+ *   node scripts/probe.mjs --overflow            # adds a ~2MB request per model
+ *   node scripts/probe.mjs --model GLM-5.2-NVFP4 --timeout 300000
  *
  * It sends a handful of tiny requests per model. Nothing is written anywhere
  * unless --json is passed.
@@ -64,9 +66,32 @@ async function call(path, body, { stream = false } = {}) {
 		}
 		return { ok: response.ok, status: response.status, headers, text, json, ms: Date.now() - started };
 	} catch (error) {
-		return { ok: false, status: 0, headers: {}, text: String(error), ms: Date.now() - started };
+		return {
+			ok: false,
+			status: 0,
+			headers: {},
+			text: String(error),
+			timedOut: error?.name === "TimeoutError",
+			ms: Date.now() - started,
+		};
 	}
 }
+
+/**
+ * Subset of pi's context-overflow patterns (packages/ai/src/utils/overflow.ts).
+ * If the API's overflow error matches none of these, pi cannot auto-compact and
+ * retry, and the extension needs a `message_end` normalizer.
+ */
+const PI_OVERFLOW_PATTERNS = [
+	/prompt is too long/i,
+	/exceeds the context window/i,
+	/exceeds (?:the )?(?:model'?s )?maximum context length(?: of [\d,]+ tokens?|\s*\([\d,]+\))/i,
+	/maximum context length is \d+ tokens/i,
+	/reduce the length of the messages/i,
+	/context[_ ]length[_ ]exceeded/i,
+	/too many tokens/i,
+	/token limit exceeded/i,
+];
 
 function short(text, limit = 200) {
 	const collapsed = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -110,6 +135,7 @@ async function probeChat(model) {
 		ok: result.ok,
 		status: result.status,
 		ms: result.ms,
+		timedOut: result.timedOut,
 		error: result.ok ? undefined : short(result.text),
 		reply: short(message?.content, 60),
 		/** vLLM-style separate reasoning channel; drives `reasoning: true` + thinking format. */
@@ -252,15 +278,33 @@ async function probeImage(model) {
 	};
 }
 
-async function probeOverflowMessage(model) {
-	// Cheap overflow: an impossible output request usually surfaces the same
-	// error phrasing pi's overflow detection has to recognise.
+async function probeMaxTokensCeiling(model) {
+	// An impossible output request makes the server state its own max_model_len,
+	// which is the authoritative context window.
 	const result = await call("/chat/completions", {
 		model,
 		max_tokens: 100_000_000,
 		messages: [{ role: "user", content: "hi" }],
 	});
 	return { ok: result.ok, status: result.status, message: short(result.text, 300) };
+}
+
+async function probeContextOverflow(model) {
+	// Genuinely overflow the input so pi's auto-compaction path can be validated.
+	// ~340k whitespace-separated words comfortably exceeds a 262k window.
+	const filler = "token ".repeat(340_000);
+	const result = await call("/chat/completions", {
+		model,
+		max_tokens: 16,
+		messages: [{ role: "user", content: `Summarise:\n${filler}` }],
+	});
+	const message = result.json?.error?.message ?? result.text;
+	return {
+		status: result.status,
+		timedOut: result.timedOut,
+		message: short(message, 300),
+		recognisedByPi: PI_OVERFLOW_PATTERNS.some((pattern) => pattern.test(String(message))),
+	};
 }
 
 const models = await probeModels();
@@ -272,7 +316,12 @@ for (const model of models) {
 
 	entry.chat = await probeChat(model);
 	if (!entry.chat.ok) {
-		console.log(`  chat: FAILED (HTTP ${entry.chat.status}) ${entry.chat.error}`);
+		if (entry.chat.timedOut) {
+			console.log(`  chat                     TIMEOUT after ${entry.chat.ms}ms — model may be cold or overloaded`);
+			console.log(`                           retry with: node scripts/probe.mjs --model ${model} --timeout 300000`);
+		} else {
+			console.log(`  chat                     FAILED (HTTP ${entry.chat.status}) ${entry.chat.error}`);
+		}
 		continue;
 	}
 	console.log(`  chat                     ok in ${entry.chat.ms}ms — "${entry.chat.reply}"`);
@@ -304,8 +353,14 @@ for (const model of models) {
 	entry.maxCompletionTokens = await probeMaxCompletionTokens(model);
 	console.log(`  max_completion_tokens    ${mark(entry.maxCompletionTokens.ok)}`);
 
-	entry.overflow = await probeOverflowMessage(model);
-	console.log(`  huge max_tokens error    HTTP ${entry.overflow.status} — ${entry.overflow.message}`);
+	entry.maxTokensCeiling = await probeMaxTokensCeiling(model);
+	console.log(`  max_tokens ceiling       HTTP ${entry.maxTokensCeiling.status} — ${entry.maxTokensCeiling.message}`);
+
+	if (args.includes("--overflow")) {
+		entry.contextOverflow = await probeContextOverflow(model);
+		console.log(`  context overflow error   HTTP ${entry.contextOverflow.status} — ${entry.contextOverflow.message}`);
+		console.log(`  pi recognises overflow   ${mark(entry.contextOverflow.recognisedByPi)}`);
+	}
 
 	const limits = Object.entries(entry.chat.rateLimitHeaders);
 	console.log(`  rate-limit headers       ${limits.length > 0 ? limits.map(([k, v]) => `${k}: ${v}`).join(", ") : "none"}`);
@@ -323,6 +378,14 @@ const vision = Object.entries(report.models).filter(([, entry]) => entry.image?.
 console.log(`Accepts base64 images: ${vision.length > 0 ? vision.map(([id]) => id).join(", ") : "none"}`);
 const reasoning = Object.entries(report.models).filter(([, entry]) => entry.chat?.reasoningContent);
 console.log(`Returns reasoning_content: ${reasoning.length > 0 ? reasoning.map(([id]) => id).join(", ") : "none"}`);
+const unreachable = Object.entries(report.models).filter(([, entry]) => entry.chat && !entry.chat.ok);
+if (unreachable.length > 0) {
+	console.log(
+		`Did not answer: ${unreachable
+			.map(([id, entry]) => `${id} (${entry.chat.timedOut ? `timeout after ${entry.chat.ms}ms` : `HTTP ${entry.chat.status}`})`)
+			.join(", ")}`,
+	);
+}
 
 if (JSON_OUT) {
 	const { writeFileSync } = await import("node:fs");
