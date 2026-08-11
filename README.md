@@ -118,6 +118,11 @@ or diff, translating, extracting fields — and it answers from a free Hetzner m
 gets no tools, no repository access and no conversation history, so everything it needs must be
 in the call.
 
+Thinking is switched off for the delegate. This work is mechanical, and reasoning is billed against
+the same per-key output budget the main model is spending — so paying for a reasoning block that is
+then discarded is waste. Models with no measured switch are left alone rather than sent a guessed
+key, and `/hetzner ask` reports which case applied in the tool result.
+
 It is off by default: an extra tool in every system prompt is intrusive, and it is pointless when
 the main model is already a Hetzner one.
 

@@ -124,6 +124,12 @@ not know, keeps `reasoning: false`: the failure mode of guessing is a control th
 doesn't, which is worse than pi's display-only behaviour. A test asserts that every documented model
 has a measured switch, so adding one to the table without probing it fails the suite.
 
+`hetzner_ask` needs the same rule for a different reason — it always wants thinking off, since it
+summarises and extracts and then throws the reasoning away — so the "measured key or nothing" decision
+lives once, in `thinkingOffKwargs()`, and both callers read it. Duplicating the key list in the
+delegate would eventually let the two disagree, and the failure would be invisible: the request would
+still return HTTP 200.
+
 One consequence of choosing `chat-template`: pi's thinking parameters are a single if/else chain, and
 the `chat-template` branch precedes the `reasoning_effort` branch, so `supportsReasoningEffort` is
 never consulted for these models. The probe confirmed `reasoning_effort` is accepted, but pi has no
@@ -166,8 +172,9 @@ with another provider produces no noise. `/hetzner quiet` persists the opt-out.
 ## Testing
 
 - `npm test` — `node:test`, no network: catalog merge (prefixed ids, unknown ids, retirement,
-  dedup, ordering) and the rate window (expiry boundaries, worst-limit fraction, formatting,
-  header parsing) with an injected clock
+  dedup, ordering), the per-model thinking switches — including that every documented model has a
+  measured one and that the merge does not drop the shared flags — and the rate window (expiry
+  boundaries, worst-limit fraction, formatting, header parsing) with an injected clock
 - `npm run typecheck` — `tsc --noEmit` against the real pi type definitions
 - `pi -e ./src/index.ts --list-models` — verified: four models registered with a token present,
   hidden and error-free without one
@@ -193,11 +200,23 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
 
 ## Open questions
 
-1. **Latency variance** — GLM-5.2-NVFP4 took 2.3s, 29.8s, 45s and twice over 60s on the same one-word
+1. **Capability drift, and no way to notice it** — GLM-5.2-NVFP4 rejected `max_completion_tokens` on
+   one probe run and accepted it on a later one the same day. Every compat flag in `src/catalog.ts` is
+   a snapshot of a deployment that is explicitly labelled an experiment, and nothing in the package
+   detects when a snapshot goes stale: a flag that silently becomes wrong produces a broken model, not
+   a warning. Re-running `npm run probe` before each release is the current answer, which relies on
+   remembering to do it. A cheap improvement would be `npm run probe --json` output committed as a
+   baseline, with a diff against it in CI; the reason not to do it yet is that CI would need a live API
+   token, and the rate window is per key.
+2. **Latency variance** — GLM-5.2-NVFP4 took 2.3s, 29.8s, 45s and twice over 60s on the same one-word
    prompt across five runs. Nothing to fix in the extension; noted in `/hetzner models` so a stalled
    turn is not mistaken for a bug. It is a weak choice for interactive work, and probing it needs
    `--timeout 300000`.
-2. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
+3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
-3. **Publishing** — `repository`/`homepage` are unset in `package.json` and should point at the
-   public repo before `npm publish`.
+4. **Publishing** — the source is public at
+   [naturalmoods/pi-hetzner-inference](https://github.com/naturalmoods/pi-hetzner-inference) and
+   `repository`/`homepage`/`bugs` point at it. Not yet on npm: `CHANGELOG.md` still says
+   `0.1.0 — unreleased`, which wants a date, and `npm pack --dry-run` is worth a look first to confirm
+   the `files` list ships `src` and `scripts` and nothing else. `--provenance` needs a CI run to mean
+   anything, so a local publish should omit it.

@@ -5,11 +5,15 @@
  * model is an expensive one: summarising logs, translating, extracting fields
  * from large dumps. The delegate gets no tools and no repository access, so
  * everything it needs must be in `input`.
+ *
+ * Thinking is switched off where the model has a measured switch: this work is
+ * mechanical, and reasoning is billed against the same per-key output budget the
+ * main model is spending.
  */
 
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { BASE_URL, PROVIDER_ID } from "./catalog.ts";
+import { BASE_URL, PROVIDER_ID, thinkingOffKwargs } from "./catalog.ts";
 import type { State } from "./state.ts";
 
 const REQUEST_TIMEOUT_MS = 180_000;
@@ -47,6 +51,12 @@ export function registerAskTool(pi: ExtensionAPI, state: State): void {
 			const model = params.model || state.config.askModel || state.models[0]?.id;
 			if (!model) throw new Error("No Hetzner model available.");
 
+			// Every model here reasons unprompted and bills for it. The delegate is
+			// summarising and extracting, so that reasoning is discarded — switch it
+			// off where a switch has been measured, and leave the request alone where
+			// one has not, since an unrecognised key is accepted and ignored.
+			const thinkingOff = thinkingOffKwargs(model);
+
 			const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
 			const response = await fetch(`${BASE_URL}/chat/completions`, {
 				method: "POST",
@@ -57,6 +67,7 @@ export function registerAskTool(pi: ExtensionAPI, state: State): void {
 				body: JSON.stringify({
 					model,
 					max_tokens: state.config.maxTokens,
+					...(thinkingOff ? { chat_template_kwargs: thinkingOff } : {}),
 					messages: [
 						{
 							role: "system",
@@ -88,7 +99,12 @@ export function registerAskTool(pi: ExtensionAPI, state: State): void {
 
 			return {
 				content: [{ type: "text" as const, text }],
-				details: { model, usage, finishReason: payload.choices?.[0]?.finish_reason },
+				details: {
+					model,
+					usage,
+					finishReason: payload.choices?.[0]?.finish_reason,
+					thinking: thinkingOff ? "off" : "not switchable",
+				},
 			};
 		},
 	});

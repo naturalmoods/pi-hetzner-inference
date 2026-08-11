@@ -7,6 +7,7 @@ import {
 	MIN_MAX_TOKENS,
 	mergeCatalog,
 	staticCatalog,
+	thinkingOffKwargs,
 	UNKNOWN_MODEL_DEFAULTS,
 } from "../src/catalog.ts";
 
@@ -118,6 +119,25 @@ test("every documented model now has a measured thinking switch", () => {
 	for (const model of staticCatalog()) {
 		assert.equal(model.reasoning, true, `${model.id} has no measured reasoning setting`);
 		assert.equal(completionsCompat(model).thinkingFormat, "chat-template", `${model.id} has no thinking switch`);
+	}
+});
+
+test("hetzner_ask switches thinking off only where a switch was measured", () => {
+	// The delegate discards reasoning, so paying for it is waste — but a guessed
+	// key is accepted with HTTP 200 and ignored, which would bill for thinking
+	// while looking like it worked. Unknown ids must get no kwargs at all.
+	assert.deepEqual(thinkingOffKwargs("Kimi-K2.7-Code"), { thinking: false });
+	assert.deepEqual(thinkingOffKwargs("GLM-5.2-NVFP4"), { thinking: false });
+	assert.deepEqual(thinkingOffKwargs("Qwen/Qwen3.6-35B-A3B-FP8"), { enable_thinking: false });
+	// Prefixed ids reach the same spec as the catalog merge does.
+	assert.deepEqual(thinkingOffKwargs("moonshotai/Kimi-K2.7-Code"), { thinking: false });
+	assert.equal(thinkingOffKwargs("Some-New-Model-2027"), undefined);
+	assert.equal(thinkingOffKwargs(""), undefined);
+});
+
+test("every documented model can have its thinking switched off by the delegate", () => {
+	for (const spec of KNOWN_MODELS) {
+		assert.ok(thinkingOffKwargs(spec.id), `${spec.id} has no delegate thinking switch`);
 	}
 });
 

@@ -17,5 +17,6 @@ Initial release.
 - Rate-limit budget for the documented 60s / 10M input / 200k output per-key window: status line,
   80% warning, 429 explanation, and any rate-limit headers the API returns
 - `/hetzner status|models|refresh|quiet|ask`
-- Opt-in `hetzner_ask` tool for delegating bulk text work to a free model
+- Opt-in `hetzner_ask` tool for delegating bulk text work to a free model, with thinking switched off
+  so the delegate does not bill reasoning it discards
 - `scripts/probe.mjs` capability probe for the behaviour Hetzner does not document

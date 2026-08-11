@@ -254,6 +254,24 @@ export function findSpec(id: string): ModelSpec | undefined {
 	return KNOWN_MODELS.find((spec) => spec.id === id || spec.match.test(id));
 }
 
+/**
+ * `chat_template_kwargs` that switch thinking off for a model id, or undefined
+ * when no switch was measured for it.
+ *
+ * Two callers want this rule and must not disagree about it: `compatFor()`, which
+ * hands pi the key so the user's thinking level drives the value, and
+ * `hetzner_ask`, which always wants thinking off — the delegate does bulk text
+ * work, and a reasoning block that is billed and then discarded is pure cost
+ * against the shared per-key output budget. Returning undefined for an unmeasured
+ * model is the load-bearing part: a guessed key is accepted with HTTP 200 and
+ * ignored, so it would silently bill for thinking while looking like it worked.
+ */
+export function thinkingOffKwargs(id: string): Record<string, boolean> | undefined {
+	const spec = findSpec(id);
+	if (!spec?.reasoning || !spec.thinkingKwarg) return undefined;
+	return { [spec.thinkingKwarg]: false };
+}
+
 export interface MergeResult {
 	models: ProviderModelConfig[];
 	/** Reported ids with no entry in `KNOWN_MODELS`; registered with defaults. */
