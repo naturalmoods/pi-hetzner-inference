@@ -91,18 +91,49 @@ upgrading fixes a wrong context window immediately instead of waiting for a cach
 
 ### Compat flags follow the probe, not guesswork
 
-Measured on 2026-08-11 against all four models: function calling and forced `tool_choice` work,
-tool results replay, streaming carries usage (`supportsUsageInStreaming: true`), no model returns
-`reasoning_content` (`reasoning: false`), and DeepSeek and GLM reject image content while Qwen and
-Kimi accept base64 `data:` URIs. The rest (`supportsDeveloperRole`, `supportsStore`,
-`supportsStrictMode`, `supportsOpenAIGrammarTools`) stay `false`: they are OpenAI platform features
-that were not exercised, and `false` selects the behaviour known to work. Users can flip individual
-models via `modelOverrides` without patching.
+Measured on 2026-08-11: function calling and forced `tool_choice` work, tool results replay, streaming
+carries usage (`supportsUsageInStreaming: true`), and DeepSeek and GLM reject image content while Qwen
+and Kimi accept base64 `data:` URIs. The rest
+(`supportsDeveloperRole`, `supportsStore`, `supportsStrictMode`, `supportsOpenAIGrammarTools`) stay
+`false`: they are OpenAI platform features that were not exercised, and `false` selects the behaviour
+known to work. Users can flip individual models via `modelOverrides` without patching.
 
-`maxTokensField: "max_tokens"` is the one flag that is load-bearing rather than cautious: GLM-5.2
-rejects `max_completion_tokens` while the other three accept it, so pi's default would break that
-model. The deployment is not uniform, which is a good argument for keeping every compat decision
-tied to a probe result.
+The first probe reported "no reasoning" for this deployment, and that was a **bug in the probe**: it
+checked `reasoning_content` only, while pi reads `reasoning_content`, `reasoning` and `reasoning_text`
+in that order (`reasoningFields` in pi-ai's `api/openai-completions.js`). Hetzner uses the second.
+Every model that answered returns a populated `reasoning` field, which also explains the output tokens
+that the first probe wrote up as billed-but-withheld — they were neither hidden nor lost, just looked
+for under the wrong name. Two lessons are now built into `scripts/probe.mjs`: enumerate the raw
+message keys rather than testing one guess, and mirror pi's own field precedence instead of a single
+convention.
+
+### The thinking switch is per model, and acceptance is not confirmation
+
+`reasoning: true` alone would let pi *display* thinking it cannot control. What makes `think:off`
+work is `thinkingFormat: "chat-template"` plus a `chat_template_kwargs` key, and the key is not
+uniform: Qwen wants `enable_thinking`, Kimi and DeepSeek want `thinking`. Each model returns HTTP 200
+for the other's key and ignores it, so the probe asserts on the *effect* — did the `reasoning` field
+go empty — rather than on the status code. A shared default would have produced a `think:off` that
+silently does nothing on two of the three models.
+
+Consequently `reasoning` and the thinking key live on `ModelSpec`, and `compatFor()` merges them over
+the shared `COMPAT`. GLM accepts either key — it was the last to be measured, since it needs a deadline
+well past the probe's 60s default — and takes `thinking` for consistency with Kimi and DeepSeek. A
+model whose switch has *not* been measured, including any id the endpoint reports that this table does
+not know, keeps `reasoning: false`: the failure mode of guessing is a control that appears to work and
+doesn't, which is worse than pi's display-only behaviour. A test asserts that every documented model
+has a measured switch, so adding one to the table without probing it fails the suite.
+
+One consequence of choosing `chat-template`: pi's thinking parameters are a single if/else chain, and
+the `chat-template` branch precedes the `reasoning_effort` branch, so `supportsReasoningEffort` is
+never consulted for these models. The probe confirmed `reasoning_effort` is accepted, but pi has no
+occasion to send it, so the flag stays unset rather than asserting a behaviour that never runs.
+
+`maxTokensField: "max_tokens"` is pinned because the alternative is not stable here: GLM-5.2 rejected
+`max_completion_tokens` on one run and accepted it on a later one the same day. `max_tokens` has worked
+on every model on every run and the server phrases its own errors in terms of it. A capability that
+changes within a day is the strongest argument for tying every compat decision to a probe result — and
+for re-running the probe rather than trusting a table written last week.
 
 The probe also pinned the context windows from the server's own error text
 (`max_model_len=max_total_tokens=512000` / `262144`), confirming the documented numbers.
@@ -144,9 +175,17 @@ with another provider produces no noise. `/hetzner quiet` persists the opt-out.
 
 ## Resolved by the probe
 
-Function calling, streaming usage, base64 image input, real model ids (the documented table's
-display names are the actual ids, only Qwen carries an org prefix) and the context windows are all
-settled — see [Compat flags](#compat-flags-follow-the-probe-not-guesswork).
+Function calling, streaming usage, base64 image input, the `reasoning` thinking channel and its
+per-model switch, real model ids (the documented table's display names are the actual ids, only Qwen
+carries an org prefix) and the context windows are all settled — see
+[Compat flags](#compat-flags-follow-the-probe-not-guesswork).
+
+A measurement lesson worth keeping: Qwen appeared to be incapable of tool calls until the probe's
+budget went from 256 to 1024 tokens. It reasons before answering, reasoning is billed against
+`max_tokens`, and a budget that only fits the tool call itself ends the response at
+`finish_reason: "length"` mid-thought with no `tool_calls` emitted. Every capability check on a
+reasoning model needs headroom for the thinking plus the artefact being measured, and needs to report
+the finish reason so starvation is distinguishable from incapacity.
 
 Context-overflow phrasing is settled too: the API answers with "This model's maximum context length
 is 262144 tokens. However, you requested … for a total of at least …", which matches pi's overflow
@@ -154,16 +193,11 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
 
 ## Open questions
 
-1. **Where the withheld output tokens go** — Qwen and GLM bill 232 and 101 output tokens for a
-   one-word answer with `finish_reason: "stop"`, no `<think>` tags in `content` and no
-   `reasoning_content`. A thinking block is charged and then withheld. Mitigated by the
-   `MIN_MAX_TOKENS` floor (a 32-token budget produced empty replies) and harmless for accounting,
-   since the tracker reads billed usage. If the probe's raw-field dump ever reveals a thinking
-   channel, `reasoning: true` plus the matching `thinkingFormat` becomes possible.
-2. **Latency variance** — GLM-5.2-NVFP4 took 2.3s, 45s and >60s on the same one-word prompt across
-   three runs. Nothing to fix in the extension; noted in `/hetzner models` so a stalled turn is not
-   mistaken for a bug. It is a weak choice for interactive work.
-3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
+1. **Latency variance** — GLM-5.2-NVFP4 took 2.3s, 29.8s, 45s and twice over 60s on the same one-word
+   prompt across five runs. Nothing to fix in the extension; noted in `/hetzner models` so a stalled
+   turn is not mistaken for a bug. It is a weak choice for interactive work, and probing it needs
+   `--timeout 300000`.
+2. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
-4. **Publishing** — `repository`/`homepage` are unset in `package.json` and should point at the
+3. **Publishing** — `repository`/`homepage` are unset in `package.json` and should point at the
    public repo before `npm publish`.

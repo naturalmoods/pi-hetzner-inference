@@ -29,16 +29,20 @@ const FREE: ProviderModelConfig["cost"] = { input: 0, output: 0, cacheRead: 0, c
 /**
  * Compat flags for this deployment.
  *
- * Measured with `scripts/probe.mjs` on 2026-08-11 against all four models (see README):
- * - Function calling works: `tools`, forced `tool_choice`, and tool-result
- *   replay all behave, so these models can drive pi's agent loop.
+ * Measured with `scripts/probe.mjs` on 2026-08-11 (see README):
+ * - Function calling works on Kimi and DeepSeek: `tools`, forced `tool_choice`,
+ *   and tool-result replay all behave, so they can drive pi's agent loop.
  * - Streaming returns usage, hence `supportsUsageInStreaming`.
- * - No model returns `reasoning_content`, so `reasoning` stays false. Turn it on
- *   per model with `modelOverrides` in `~/.pi/agent/models.json` if that changes.
+ * - Thinking arrives on a separate channel — see `ModelSpec.reasoning` below.
  *
- * `maxTokensField: "max_tokens"` is load-bearing, not merely cautious: three
- * models accept `max_completion_tokens`, but GLM-5.2-NVFP4 rejects it. pi's
- * default would break that model outright. `max_tokens` works everywhere.
+ * `maxTokensField: "max_tokens"` is pinned because the alternative is not stable
+ * here. GLM-5.2-NVFP4 rejected `max_completion_tokens` on one probe run and
+ * accepted it on a later one the same day, so support for that field moves under
+ * us — this is an experiment, and the deployment is not uniform across models or
+ * over time. `max_tokens` has been accepted by every model on every run, and the
+ * server's own errors are phrased in terms of it, so pinning it is safer than
+ * letting pi's URL-based auto-detection choose a field whose support comes and
+ * goes.
  *
  * The remaining flags stay off because they are OpenAI platform features that
  * were not verified here; `false` falls back to behaviour that is known to work.
@@ -58,12 +62,13 @@ export const DEFAULT_MAX_TOKENS = 32_768;
 /**
  * Floor for the output cap.
  *
- * GLM and Qwen bill output tokens that never appear in the response: a one-word
- * answer cost 101 and 232 tokens respectively, with `finish_reason: "stop"`,
- * nothing in `content` beyond the answer and no `reasoning_content`. On a
- * 32-token budget that hidden work consumed everything and the reply came back
- * empty. A floor keeps a small `maxTokens` setting from producing silent
- * non-answers.
+ * These models think before answering and bill for it: a one-word answer cost
+ * 220 output tokens on Qwen and 17 on Kimi, with `finish_reason: "stop"` and only
+ * the answer in `content`. The thinking is not lost — it arrives on the separate
+ * `reasoning` channel (see `THINKING_KWARG`) — but it is charged against the same
+ * `max_tokens` budget, and on a 32-token budget it consumed everything and the
+ * visible reply came back empty. A floor keeps a small `maxTokens` setting from
+ * producing silent non-answers.
  */
 export const MIN_MAX_TOKENS = 2_048;
 
@@ -86,6 +91,30 @@ export interface ModelSpec {
 	 */
 	totalTokens: number;
 	input: ("text" | "image")[];
+	/**
+	 * Whether the server returns thinking on a separate channel for this model.
+	 *
+	 * All of these reason unprompted, and the deployment returns it in the
+	 * `reasoning` field — *not* `reasoning_content`. pi reads `reasoning_content`,
+	 * `reasoning` and `reasoning_text` in that order and renders whichever it
+	 * finds as a thinking block, and it does so regardless of this flag. What the
+	 * flag buys is the *request* side: only with `reasoning: true` does pi apply
+	 * `thinkingFormat`, which is what makes `think:off` able to switch the
+	 * reasoning off instead of merely displaying it.
+	 *
+	 * False here means "not measured", not "does not reason" — see GLM below.
+	 */
+	reasoning: boolean;
+	/**
+	 * `chat_template_kwargs` key that silences the reasoning channel, measured.
+	 *
+	 * The key is not uniform across this deployment: Qwen answers to
+	 * `enable_thinking`, Kimi and DeepSeek to `thinking`, and each ignores the
+	 * other's key while still returning HTTP 200 — an unknown kwarg is dropped
+	 * silently, so "accepted" proves nothing and only the reasoning going quiet
+	 * does. Hence one measured key per model rather than a shared guess.
+	 */
+	thinkingKwarg?: string;
 	/** Shown by `/hetzner models`. */
 	note: string;
 }
@@ -108,7 +137,9 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		match: /kimi-k2(\.7)?-code/i,
 		totalTokens: 262_144,
 		input: ["text", "image"],
-		note: "MoE 1T total / 32B active, code-tuned; fastest to first token in probing",
+		reasoning: true,
+		thinkingKwarg: "thinking",
+		note: "MoE 1T total / 32B active, code-tuned; fastest to first token in probing; reasons briefly (~17 tokens on a one-word answer)",
 	},
 	{
 		id: "GLM-5.2-NVFP4",
@@ -116,7 +147,12 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		match: /glm-5(\.2)?/i,
 		totalTokens: 512_000,
 		input: ["text"],
-		note: "MoE 744B total / 40B active, text only; latency ranged from 2.3s to 45s to >60s on a one-word prompt",
+		reasoning: true,
+		// The only model that accepts *either* key: `thinking` and `enable_thinking`
+		// both silenced it. `thinking` is used for consistency with Kimi and
+		// DeepSeek, and because it is the one this model shares with them.
+		thinkingKwarg: "thinking",
+		note: "MoE 744B total / 40B active, text only; latency is the worst of the four — 2.3s to 45s to >60s on a one-word prompt",
 	},
 	{
 		id: "DeepSeek-V4-Flash-0731",
@@ -124,6 +160,8 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		match: /deepseek-v4-flash/i,
 		totalTokens: 512_000,
 		input: ["text"],
+		reasoning: true,
+		thinkingKwarg: "thinking",
 		note: "MoE 304B total / 13B active, text only",
 	},
 	{
@@ -132,7 +170,10 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		match: /qwen3(\.6)?-35b-a3b/i,
 		totalTokens: 262_144,
 		input: ["text", "image"],
-		note: "MoE 35B total / 3B active",
+		reasoning: true,
+		// The only model that wants `enable_thinking` rather than `thinking`.
+		thinkingKwarg: "enable_thinking",
+		note: "MoE 35B total / 3B active; reasons at length (~230 output tokens for a one-word answer), so give it output room",
 	},
 ];
 
@@ -156,6 +197,30 @@ export interface CatalogOptions {
  * Reserving the output room up front makes pi's own accounting match reality, so
  * threshold compaction happens before a request can fail.
  */
+/**
+ * Per-model thinking control on top of the shared compat flags.
+ *
+ * `thinkingFormat: "chat-template"` makes pi send `chat_template_kwargs` with the
+ * measured key, and `{ $var: "thinking.enabled" }` resolves to whether the user
+ * has thinking on — so `think:off` sends `false` and the reasoning channel goes
+ * quiet, which is exactly what the probe verified.
+ *
+ * Note that this format also *replaces* `reasoning_effort`: pi picks one branch of
+ * a single if/else chain, and the `chat-template` branch precedes the
+ * `reasoning_effort` one, so `supportsReasoningEffort` is never consulted for
+ * these models. The probe did confirm the parameter is accepted, but pi has no
+ * occasion to send it, so the flag stays unset rather than asserting something
+ * that never takes effect.
+ */
+function compatFor(spec: ModelSpec | undefined): ProviderModelConfig["compat"] {
+	if (!spec?.reasoning || !spec.thinkingKwarg) return COMPAT;
+	return {
+		...COMPAT,
+		thinkingFormat: "chat-template",
+		chatTemplateKwargs: { [spec.thinkingKwarg]: { $var: "thinking.enabled" } },
+	};
+}
+
 function toModelConfig(
 	id: string,
 	spec: ModelSpec | undefined,
@@ -169,12 +234,14 @@ function toModelConfig(
 	return {
 		id,
 		name: spec?.name ?? `${id} (Hetzner)`,
-		reasoning: false,
+		// An unknown model gets `false`: pi still displays any reasoning it returns,
+		// but no unverified thinking switch is sent on its behalf.
+		reasoning: spec?.reasoning ?? false,
 		input: spec?.input ?? UNKNOWN_MODEL_DEFAULTS.input,
 		cost: FREE,
 		contextWindow: totalTokens - maxTokens,
 		maxTokens,
-		compat: COMPAT,
+		compat: compatFor(spec),
 	};
 }
 

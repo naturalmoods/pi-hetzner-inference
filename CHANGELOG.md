@@ -10,6 +10,10 @@ Initial release.
   not an error
 - Model catalog discovery from `GET /v1/models`, id-only cache with a TTL, static fallback, and
   immediate re-registration when the catalog changes
+- Thinking support: the deployment returns reasoning under `reasoning` (not `reasoning_content`), so
+  all four models ship with `reasoning: true` and the `chat_template_kwargs` key measured for each —
+  `thinking` for Kimi, DeepSeek and GLM, `enable_thinking` for Qwen — which makes `think:off` actually
+  stop the reasoning instead of only hiding it
 - Rate-limit budget for the documented 60s / 10M input / 200k output per-key window: status line,
   80% warning, 429 explanation, and any rate-limit headers the API returns
 - `/hetzner status|models|refresh|quiet|ask`

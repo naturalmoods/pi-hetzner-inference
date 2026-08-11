@@ -121,6 +121,24 @@ async function probeModels() {
 	return ONLY_MODELS.length > 0 ? ONLY_MODELS : ids;
 }
 
+/**
+ * Field names pi reads a separate reasoning channel from, in pi's own precedence
+ * order — see `reasoningFields` in pi-ai's `api/openai-completions.js`. Checking
+ * only `reasoning_content` is how an earlier run of this probe concluded "no
+ * reasoning" for a deployment that returns it under `reasoning`.
+ *
+ * The test matches pi's: a non-empty string, not merely a present key.
+ */
+const PI_REASONING_FIELDS = ["reasoning_content", "reasoning", "reasoning_text"];
+
+function reasoningFieldOf(message) {
+	for (const field of PI_REASONING_FIELDS) {
+		const value = message?.[field];
+		if (typeof value === "string" && value.length > 0) return field;
+	}
+	return undefined;
+}
+
 async function probeChat(model) {
 	const result = await call("/chat/completions", {
 		model,
@@ -138,8 +156,8 @@ async function probeChat(model) {
 		timedOut: result.timedOut,
 		error: result.ok ? undefined : short(result.text),
 		reply: short(message?.content, 60),
-		/** vLLM-style separate reasoning channel; drives `reasoning: true` + thinking format. */
-		reasoningContent: message?.reasoning_content !== undefined,
+		/** Which channel pi would pick up thinking from; drives `reasoning: true`. */
+		reasoningField: reasoningFieldOf(message),
 		usage: result.json?.usage,
 		rateLimitHeaders: Object.fromEntries(
 			Object.entries(result.headers).filter(([name]) => /ratelimit|retry-after/i.test(name)),
@@ -216,36 +234,72 @@ const WEATHER_TOOL = {
 	},
 };
 
-async function probeTools(model) {
-	const result = await call("/chat/completions", {
-		model,
-		max_tokens: 256,
-		messages: [{ role: "user", content: "What is the weather in Paris right now? Use the available tool." }],
-		tools: [WEATHER_TOOL],
-	});
-	const message = result.json?.choices?.[0]?.message;
-	const calls = message?.tool_calls;
-	const forced = result.ok
+/**
+ * Function calling.
+ *
+ * The budget has to clear the model's *thinking* as well as the tool call: these
+ * models reason before every answer, and reasoning is billed against `max_tokens`.
+ * A budget that only fits the call itself makes a capable model look incapable —
+ * it stops at `finish_reason: "length"` mid-thought, having emitted no
+ * `tool_calls`. So keep the budget roomy and always report the finish reason,
+ * which is what distinguishes "cannot call tools" from "ran out of room".
+ *
+ * `silencer` is a request fragment already measured to switch this model's
+ * thinking off. When the first attempt produces no call, retrying with it shows
+ * whether reasoning was the obstacle — and that retry is the configuration pi
+ * itself uses at `think:off`.
+ */
+async function probeTools(model, silencer) {
+	const attempt = async (extra) => {
+		const result = await call("/chat/completions", {
+			model,
+			max_tokens: 1024,
+			messages: [{ role: "user", content: "What is the weather in Paris right now? Use the available tool." }],
+			tools: [WEATHER_TOOL],
+			...extra,
+		});
+		const calls = result.json?.choices?.[0]?.message?.tool_calls;
+		return {
+			ok: result.ok,
+			status: result.status,
+			error: result.ok ? undefined : short(result.text, 300),
+			called: Array.isArray(calls) && calls.length > 0,
+			name: calls?.[0]?.function?.name,
+			arguments: short(calls?.[0]?.function?.arguments, 80),
+			finishReason: result.json?.choices?.[0]?.finish_reason,
+			outputTokens: result.json?.usage?.completion_tokens,
+		};
+	};
+
+	const plain = await attempt();
+	// Only worth a second request when thinking is a plausible explanation.
+	const withThinkingOff = !plain.called && plain.ok && silencer ? await attempt(silencer) : undefined;
+
+	const forced = plain.ok
 		? await call("/chat/completions", {
 				model,
-				max_tokens: 256,
+				max_tokens: 1024,
 				messages: [{ role: "user", content: "Weather in Paris." }],
 				tools: [WEATHER_TOOL],
 				tool_choice: { type: "function", function: { name: "get_weather" } },
+				...(withThinkingOff?.called ? silencer : {}),
 			})
 		: undefined;
 
 	return {
-		accepted: result.ok,
-		status: result.status,
-		error: result.ok ? undefined : short(result.text, 300),
-		calledTool: Array.isArray(calls) && calls.length > 0,
-		callName: calls?.[0]?.function?.name,
-		callArguments: short(calls?.[0]?.function?.arguments, 80),
-		finishReason: result.json?.choices?.[0]?.finish_reason,
+		accepted: plain.ok,
+		status: plain.status,
+		error: plain.error,
+		calledTool: plain.called,
+		callName: plain.name,
+		callArguments: plain.arguments,
+		finishReason: plain.finishReason,
+		outputTokens: plain.outputTokens,
+		thinkingOff: withThinkingOff,
 		toolChoiceAccepted: forced ? forced.ok : undefined,
 		toolChoiceError: forced && !forced.ok ? short(forced.text, 200) : undefined,
 		toolChoiceCalled: forced?.json?.choices?.[0]?.message?.tool_calls?.length > 0,
+		toolChoiceFinishReason: forced?.json?.choices?.[0]?.finish_reason,
 	};
 }
 
@@ -376,9 +430,77 @@ async function probeVisibleOutput(model) {
 		contentLength: content.length,
 		preview: short(content, 120),
 		thinkTags: /<\/?(think|thinking|reasoning|thought)\b/i.test(content),
-		reasoningContent: message?.reasoning_content !== undefined,
+		reasoningField: reasoningFieldOf(message),
+		reasoningLength: (message?.[reasoningFieldOf(message) ?? ""] ?? "").length,
 		outputTokens: result.json?.usage?.completion_tokens,
 	};
+}
+
+/**
+ * Whether `reasoning_effort` is accepted.
+ *
+ * This decides whether `reasoning: true` is safe. pi sends `reasoning_effort`
+ * when `model.reasoning && compat.supportsReasoningEffort`, and that flag
+ * defaults to *auto-detected from the base URL* — an unknown value for this
+ * deployment. Setting `reasoning: true` while the server rejects the parameter
+ * would break every request, the same way `max_completion_tokens` breaks GLM.
+ */
+async function probeReasoningEffort(model) {
+	const result = await call("/chat/completions", {
+		model,
+		max_tokens: 512,
+		reasoning_effort: "low",
+		messages: [{ role: "user", content: "Reply with exactly one word: ready" }],
+	});
+	return {
+		ok: result.ok,
+		status: result.status,
+		error: result.ok ? undefined : short(result.text, 200),
+		reasoningLength: (result.json?.choices?.[0]?.message?.[
+			reasoningFieldOf(result.json?.choices?.[0]?.message) ?? ""
+		] ?? "").length,
+	};
+}
+
+/**
+ * Whether the thinking channel can be switched off.
+ *
+ * These models think unprompted and bill for it. If one of the vLLM chat-template
+ * switches silences it, pi can drive that through `compat.thinkingFormat` and the
+ * user gets a working `think:off`. Accepting the parameter is not enough — a
+ * server that ignores an unknown kwarg still answers HTTP 200, so the measurement
+ * that counts is whether the reasoning channel actually went away.
+ */
+const THINKING_SWITCHES = [
+	{ label: "chat_template_kwargs.enable_thinking", body: { chat_template_kwargs: { enable_thinking: false } } },
+	{ label: "chat_template_kwargs.thinking", body: { chat_template_kwargs: { thinking: false } } },
+	{ label: "enable_thinking (top level)", body: { enable_thinking: false } },
+];
+
+async function probeThinkingToggle(model) {
+	const attempts = [];
+	for (const variant of THINKING_SWITCHES) {
+		const result = await call("/chat/completions", {
+			model,
+			max_tokens: 512,
+			messages: [{ role: "user", content: "Reply with exactly one word: ready" }],
+			...variant.body,
+		});
+		const message = result.json?.choices?.[0]?.message;
+		const field = reasoningFieldOf(message);
+		attempts.push({
+			label: variant.label,
+			// Kept so a later probe can re-run under the configuration pi will
+			// actually use once this switch is wired into `compat`.
+			body: variant.body,
+			accepted: result.ok,
+			error: result.ok ? undefined : short(result.text, 120),
+			// The only outcome that matters: did the reasoning channel go quiet?
+			silenced: result.ok && field === undefined,
+			outputTokens: result.json?.usage?.completion_tokens,
+		});
+	}
+	return attempts;
 }
 
 const models = await probeModels();
@@ -399,7 +521,10 @@ for (const model of models) {
 		continue;
 	}
 	console.log(`  chat                     ok in ${entry.chat.ms}ms — "${entry.chat.reply}"`);
-	console.log(`  reasoning_content        ${mark(entry.chat.reasoningContent)}`);
+	console.log(
+		`  reasoning channel        ${entry.chat.reasoningField ?? "none"}` +
+			`${entry.chat.reasoningField ? ` — pi reads this; set reasoning: true` : ""}`,
+	);
 
 	entry.visibleOutput = await probeVisibleOutput(model);
 	if (entry.visibleOutput.ok) {
@@ -409,6 +534,28 @@ for (const model of models) {
 				` [finish: ${visible.finishReason}, ${visible.outputTokens} output tokens]`,
 		);
 		if (visible.thinkTags) console.log(`  inline think tags        yes — pi needs compat.thinkingFormat / requiresThinkingAsText`);
+		if (visible.reasoningField) {
+			console.log(`  reasoning text           ${visible.reasoningLength} chars on "${visible.reasoningField}"`);
+
+			// Both of these decide whether `reasoning: true` is safe and whether
+			// pi's think:off can ever do anything, so only run them when there is
+			// a reasoning channel to control.
+			entry.reasoningEffort = await probeReasoningEffort(model);
+			console.log(
+				`  reasoning_effort         ${mark(entry.reasoningEffort.ok)}` +
+					`${entry.reasoningEffort.error ? ` — ${entry.reasoningEffort.error}` : ` (${entry.reasoningEffort.reasoningLength} chars of reasoning)`}`,
+			);
+
+			entry.thinkingToggle = await probeThinkingToggle(model);
+			for (const attempt of entry.thinkingToggle) {
+				const outcome = !attempt.accepted
+					? `rejected — ${attempt.error}`
+					: attempt.silenced
+						? "SILENCED the reasoning channel"
+						: `accepted but ignored (${attempt.outputTokens} output tokens, still reasoning)`;
+				console.log(`  off via ${attempt.label.padEnd(16)} ${outcome}`);
+			}
+		}
 
 		// A one-word answer that costs many output tokens means hidden work.
 		if (visible.outputTokens > 4 * Math.max(1, Math.ceil(visible.contentLength / 4))) {
@@ -423,12 +570,29 @@ for (const model of models) {
 		console.log(`  visible answer (512 tok) FAILED — ${entry.visibleOutput.error}`);
 	}
 
-	entry.tools = await probeTools(model);
+	// Re-use whichever switch was measured to silence this model's thinking.
+	const silencer = entry.thinkingToggle?.find((attempt) => attempt.silenced)?.body;
+	entry.tools = await probeTools(model, silencer);
 	console.log(`  tools accepted           ${mark(entry.tools.accepted)}${entry.tools.error ? ` — ${entry.tools.error}` : ""}`);
-	console.log(`  tool call emitted        ${mark(entry.tools.calledTool)}${entry.tools.callName ? ` (${entry.tools.callName} ${entry.tools.callArguments})` : ""}`);
-	console.log(`  tool_choice forced       ${mark(entry.tools.toolChoiceAccepted && entry.tools.toolChoiceCalled)}${entry.tools.toolChoiceError ? ` — ${entry.tools.toolChoiceError}` : ""}`);
+	console.log(
+		`  tool call emitted        ${mark(entry.tools.calledTool)}` +
+			`${entry.tools.callName ? ` (${entry.tools.callName} ${entry.tools.callArguments})` : ""}` +
+			`${entry.tools.calledTool ? "" : ` [finish: ${entry.tools.finishReason}, ${entry.tools.outputTokens} output tokens]`}`,
+	);
+	if (entry.tools.thinkingOff) {
+		const retry = entry.tools.thinkingOff;
+		console.log(
+			`  tool call, thinking off  ${mark(retry.called)}` +
+				`${retry.called ? ` (${retry.name}) — thinking was the obstacle, not tool support` : ` [finish: ${retry.finishReason}]`}`,
+		);
+	}
+	console.log(
+		`  tool_choice forced       ${mark(entry.tools.toolChoiceAccepted && entry.tools.toolChoiceCalled)}` +
+			`${entry.tools.toolChoiceError ? ` — ${entry.tools.toolChoiceError}` : ""}` +
+			`${entry.tools.toolChoiceAccepted && !entry.tools.toolChoiceCalled ? ` [finish: ${entry.tools.toolChoiceFinishReason}]` : ""}`,
+	);
 
-	if (entry.tools.calledTool) {
+	if (entry.tools.calledTool || entry.tools.thinkingOff?.called) {
 		entry.toolRoundTrip = await probeToolResultRoundTrip(model);
 		console.log(`  tool result replay       ${mark(entry.toolRoundTrip.ok)}${entry.toolRoundTrip.error ? ` — ${entry.toolRoundTrip.error}` : ""}`);
 	}
@@ -471,17 +635,39 @@ for (const model of models) {
 }
 
 console.log("\n## Verdict\n");
-const agentCapable = Object.entries(report.models).filter(([, entry]) => entry.tools?.calledTool);
+const agentCapable = Object.entries(report.models).filter(
+	([, entry]) => entry.tools?.calledTool || entry.tools?.thinkingOff?.called,
+);
 if (agentCapable.length > 0) {
-	console.log(`Usable as pi's main model (function calling works): ${agentCapable.map(([id]) => id).join(", ")}`);
+	console.log(
+		`Usable as pi's main model (function calling works): ${agentCapable
+			.map(([id, entry]) => (entry.tools.calledTool ? id : `${id} (only with thinking off)`))
+			.join(", ")}`,
+	);
 } else {
 	console.log("No model emitted a tool call. These models cannot drive pi's agent loop;");
 	console.log("use them through the hetzner_ask delegation tool instead (/hetzner ask on).");
 }
 const vision = Object.entries(report.models).filter(([, entry]) => entry.image?.ok);
 console.log(`Accepts base64 images: ${vision.length > 0 ? vision.map(([id]) => id).join(", ") : "none"}`);
-const reasoning = Object.entries(report.models).filter(([, entry]) => entry.chat?.reasoningContent);
-console.log(`Returns reasoning_content: ${reasoning.length > 0 ? reasoning.map(([id]) => id).join(", ") : "none"}`);
+const reasoning = Object.entries(report.models).filter(([, entry]) => entry.chat?.reasoningField);
+console.log(
+	`Returns a reasoning channel: ${
+		reasoning.length > 0 ? reasoning.map(([id, entry]) => `${id} (${entry.chat.reasoningField})`).join(", ") : "none"
+	}`,
+);
+const effortRejected = reasoning.filter(([, entry]) => entry.reasoningEffort && !entry.reasoningEffort.ok);
+if (effortRejected.length > 0) {
+	console.log(`Rejects reasoning_effort: ${effortRejected.map(([id]) => id).join(", ")} — keep compat.supportsReasoningEffort false`);
+}
+const silenceable = reasoning.filter(([, entry]) => entry.thinkingToggle?.some((attempt) => attempt.silenced));
+console.log(
+	silenceable.length > 0
+		? `Thinking can be switched off: ${silenceable
+				.map(([id, entry]) => `${id} via ${entry.thinkingToggle.find((a) => a.silenced).label}`)
+				.join(", ")}`
+		: "Thinking cannot be switched off by any known switch: these models always reason, and always bill for it.",
+);
 const unreachable = Object.entries(report.models).filter(([, entry]) => entry.chat && !entry.chat.ok);
 if (unreachable.length > 0) {
 	console.log(

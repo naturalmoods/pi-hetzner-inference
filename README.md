@@ -33,6 +33,10 @@ export HETZNER_INFERENCE_API_KEY=<your-token>
 A stored credential (`/login`) wins over the environment variable. With neither, the provider
 stays registered but its models are hidden from `/model` and `--list-models` — nothing errors.
 
+The one exception is `--model hetzner/...` on the command line: pi resolves that model at startup,
+so without a token it fails with *No API key found for hetzner*. Authenticate first (start pi
+without `--model`, run `/login hetzner`), or export the variable before launching.
+
 ## Use
 
 ```bash
@@ -51,22 +55,32 @@ or `/model hetzner/...` inside a session. Commands:
 
 ## Models
 
-| Model | Total tokens | Modalities | Agent loop | Architecture |
-| --- | --- | --- | --- | --- |
-| `Kimi-K2.7-Code` | 262k | text + image | yes | MoE 1T total / 32B active, code-tuned |
-| `DeepSeek-V4-Flash-0731` | 512k | text | yes | MoE 304B total / 13B active |
-| `Qwen/Qwen3.6-35B-A3B-FP8` | 262k | text + image | yes | MoE 35B total / 3B active |
-| `GLM-5.2-NVFP4` | 512k | text | yes | MoE 744B total / 40B active |
+| Model | Total tokens | Modalities | Agent loop | Thinking | Architecture |
+| --- | --- | --- | --- | --- | --- |
+| `Kimi-K2.7-Code` | 262k | text + image | yes | on, switchable | MoE 1T total / 32B active, code-tuned |
+| `DeepSeek-V4-Flash-0731` | 512k | text | yes | on, switchable | MoE 304B total / 13B active |
+| `Qwen/Qwen3.6-35B-A3B-FP8` | 262k | text + image | yes | on, switchable | MoE 35B total / 3B active |
+| `GLM-5.2-NVFP4` | 512k | text | yes | on, switchable | MoE 744B total / 40B active |
 
-That figure is the server's `max_model_len`, and it caps **input plus requested output together**:
+**All four think before answering**, and the deployment returns that thinking on a separate
+`reasoning` channel, so pi shows it as a collapsible block rather than mixing it into the answer.
+Thinking is billed as output either way, and `think:off` genuinely stops it on every model — each
+one's switch was measured rather than assumed.
+
+Thinking is also why `maxTokens` should not be set low on Qwen in particular: it reasons at length
+(around 230 output tokens to answer a one-word question), and with only 256 tokens of budget it never
+reached the tool call at all — it stopped at `finish_reason: "length"` mid-thought. With room it calls
+tools reliably. If a model looks incapable of tool use, check the finish reason before believing it.
+
+The token figure is the server's `max_model_len`, and it caps **input plus requested output together**:
 a 262k-token prompt is rejected if `max_tokens` is 16. So the context window pi is told about is
 `max_model_len - maxTokens` (229k input + 32k output for Kimi, by default). Without that reservation
 pi would consider a turn to fit that the server then refuses — recoverable, but a wasted round trip.
 Lower `maxTokens` if you would rather trade output room for input room.
 
-**Latency is uneven.** GLM-5.2-NVFP4 failed to answer a one-word prompt within 60 seconds on one
-run and answered in 2.3 seconds on the next. Expect that from an experimental platform, and re-check
-any model with `node scripts/probe.mjs --model <id> --timeout 300000`.
+**Latency is uneven.** GLM-5.2-NVFP4 answered a one-word prompt in 2.3 seconds on one run, took 45
+seconds on another, and exceeded 60 seconds on two more. Expect that from an experimental platform,
+and re-check any model with `node scripts/probe.mjs --model <id> --timeout 300000`.
 
 `/v1/models` returns ids only, so the metadata above lives in `src/catalog.ts` and is overlaid
 onto whatever the endpoint reports. An id this package does not recognise is still registered,
@@ -139,7 +153,7 @@ HETZNER_INFERENCE_API_KEY=<token> npm run probe
 npm run probe -- --overflow          # also verifies pi's auto-compaction path (~2MB per model)
 ```
 
-Results from 2026-08-11, all four models:
+Results from 2026-08-11:
 
 | Capability | Result |
 | --- | --- |
@@ -148,33 +162,49 @@ Results from 2026-08-11, all four models:
 | Tool-result round trip | yes |
 | Streaming | yes, with usage in the stream |
 | Base64 `data:` image input | Qwen and Kimi yes; DeepSeek and GLM reject it as "not a multimodal model" |
-| `reasoning_content` | none of them |
-| `max_completion_tokens` | **GLM rejects it**; the others accept it — so this package sends `max_tokens` |
+| Separate thinking channel | `reasoning` on all four — **not** `reasoning_content` |
+| Switching thinking off | `chat_template_kwargs.thinking` on Kimi, DeepSeek and GLM; `.enable_thinking` on Qwen and GLM |
+| `reasoning_effort` | accepted, but pi never sends it under `thinkingFormat: "chat-template"` |
+| `max_completion_tokens` | GLM rejected it on one run and accepted it on a later one — so this package pins `max_tokens` |
 | Rate-limit response headers | none sent |
 | Context-overflow error | matches pi's overflow patterns, so pi auto-compacts and retries |
-| Trivial prompt latency | 0.9–2.5s, with 45s and >60s outliers on GLM |
+| Trivial prompt latency | 0.8–3.4s, with 30s, 45s and >60s outliers on GLM |
 
-Two consequences worth knowing:
+GLM-5.2-NVFP4 needs a longer deadline than the probe's default to be measured at all
+(`npm run probe -- --model GLM-5.2-NVFP4 --timeout 300000`); it answered a one-word prompt in 29.8s on
+the run that produced its rows above.
 
-**GLM rejects `max_completion_tokens`.** pi's default field would break that model outright, which
-is why `maxTokensField: "max_tokens"` is pinned rather than left to the default. The deployment is
-not uniform across models.
+Three consequences worth knowing:
 
-**Qwen and GLM bill output tokens you never see.** A one-word answer cost 232 and 101 output tokens
-respectively, with `finish_reason: "stop"`, only the answer in `content` and no `reasoning_content` —
-so a thinking block is being charged and then withheld. On a 32-token budget that hidden work
-consumed everything and the reply came back empty. Hence `maxTokens` has a 2048-token floor, and the
-rate-limit tracker counts the real (billed) output, not the visible text. `npm run probe` dumps the
-raw message and streaming delta fields when it sees this, in case a thinking channel turns up that
-pi could be told about.
+**`max_completion_tokens` support moves under you.** GLM-5.2-NVFP4 rejected that field outright on
+one probe run and accepted it on a later one the same day. `max_tokens` has been accepted by every
+model on every run, and the server phrases its own errors in terms of it, so
+`maxTokensField: "max_tokens"` is pinned rather than left to pi's URL-based auto-detection. Treat
+every capability here as a property of today's deployment, not a guarantee.
 
-So `src/catalog.ts` sets `reasoning: false`, `supportsUsageInStreaming: true`, image input only on
-Qwen and Kimi, and keeps the remaining OpenAI-platform compat flags off (`system` instead of
-`developer`, `max_tokens`, no strict function schemas, no grammar tools) because those were not
-exercised and `false` is the behaviour that is known to work.
+**The thinking channel is `reasoning`, not `reasoning_content`.** Every model bills output tokens for
+thinking a one-word reply — around 230 on Qwen, 91 on GLM, 26 on DeepSeek, 17 on Kimi — and that text
+comes back under `reasoning`. pi reads `reasoning_content`, `reasoning` and `reasoning_text` in that
+order and renders whichever it finds, so the thinking is displayed, not lost. Two things follow: the
+`maxTokens` floor of 2048 stays (on a 32-token budget thinking consumed the whole budget and the
+visible reply came back empty), and `reasoning: true` plus the measured `thinkingFormat` is what makes
+`think:off` actually stop the reasoning instead of merely hiding it.
 
-To turn reasoning on for one model without patching the package, use `modelOverrides` in
-`~/.pi/agent/models.json` — it applies to extension-registered models:
+**The thinking switch differs per model.** Qwen answers to `chat_template_kwargs.enable_thinking`,
+Kimi and DeepSeek to `chat_template_kwargs.thinking`, GLM to either — and where a model does not
+recognise a key it still returns HTTP 200 and ignores it. Accepting a parameter proves nothing here;
+only the reasoning channel going quiet does. That is why `src/catalog.ts` carries one measured key per
+model rather than a shared default.
+
+So `src/catalog.ts` sets `supportsUsageInStreaming: true`, `reasoning: true` with the per-model
+thinking switch on all four, image input only on Qwen and Kimi, and keeps the remaining
+OpenAI-platform compat flags off (`system` instead of `developer`, `max_tokens`, no strict function
+schemas, no grammar tools) because those were not exercised and `false` is the behaviour that is known
+to work.
+
+To override any of this without patching the package, use `modelOverrides` in
+`~/.pi/agent/models.json` — it applies to extension-registered models. For example, to pin a model to
+the other thinking switch, or to turn reasoning off for one entirely:
 
 ```json
 {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import {
 	DEFAULT_MAX_TOKENS,
 	KNOWN_MODELS,
@@ -79,4 +80,62 @@ test("known models sort before unknown ones, duplicates collapse", () => {
 test("maxTokens is configurable", () => {
 	const result = mergeCatalog(["GLM-5.2-NVFP4"], { maxTokens: 4096 });
 	assert.equal(result.models[0]?.maxTokens, 4096);
+});
+
+/**
+ * `compat` is a union across pi's four API flavours. This provider is always
+ * `openai-completions`, so narrow to that member before reading its fields.
+ */
+function completionsCompat(model: ProviderModelConfig | undefined) {
+	const compat = model?.compat;
+	if (!compat || !("maxTokensField" in compat)) {
+		throw new Error(`${model?.id ?? "model"} is not configured with openai-completions compat`);
+	}
+	return compat;
+}
+
+test("each reasoning model carries the thinking switch measured for it", () => {
+	// The keys are not interchangeable: sending Kimi's key to Qwen is accepted and
+	// silently ignored, which would make think:off a no-op instead of an error.
+	for (const [id, kwarg] of [
+		["Kimi-K2.7-Code", "thinking"],
+		["DeepSeek-V4-Flash-0731", "thinking"],
+		["GLM-5.2-NVFP4", "thinking"],
+		["Qwen/Qwen3.6-35B-A3B-FP8", "enable_thinking"],
+	] as const) {
+		const [model] = mergeCatalog([id]).models;
+		assert.equal(model?.reasoning, true, `${id} should report reasoning`);
+		const compat = completionsCompat(model);
+		assert.equal(compat.thinkingFormat, "chat-template");
+		assert.deepEqual(compat.chatTemplateKwargs, { [kwarg]: { $var: "thinking.enabled" } });
+	}
+});
+
+test("every documented model now has a measured thinking switch", () => {
+	// If a model is added to the table without probing its switch, this fails —
+	// which is the point. `reasoning: true` with an unverified key gives pi a
+	// think:off that silently does nothing.
+	for (const model of staticCatalog()) {
+		assert.equal(model.reasoning, true, `${model.id} has no measured reasoning setting`);
+		assert.equal(completionsCompat(model).thinkingFormat, "chat-template", `${model.id} has no thinking switch`);
+	}
+});
+
+test("a model whose thinking control is unmeasured sends no thinking switch", () => {
+	// pi still renders any reasoning an unknown model returns; what must not
+	// happen is pi believing it can switch that thinking off.
+	const [unknown] = mergeCatalog(["Some-New-Model-2027"]).models;
+	assert.equal(unknown?.reasoning, false);
+	assert.equal(completionsCompat(unknown).thinkingFormat, undefined);
+	assert.equal(completionsCompat(unknown).chatTemplateKwargs, undefined);
+});
+
+test("max_tokens stays pinned for every model, reasoning or not", () => {
+	// GLM rejects max_completion_tokens outright; the flag must survive the
+	// per-model compat merge rather than being replaced by it.
+	for (const model of staticCatalog()) {
+		const compat = completionsCompat(model);
+		assert.equal(compat.maxTokensField, "max_tokens", `${model.id} lost maxTokensField`);
+		assert.equal(compat.supportsUsageInStreaming, true, `${model.id} lost supportsUsageInStreaming`);
+	}
 });
