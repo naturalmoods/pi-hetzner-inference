@@ -74,10 +74,10 @@ function modelsReport(state: State): string {
 	const lines = [`${state.models.length} model(s) registered from ${state.source}:`];
 	for (const model of state.models) {
 		const spec = findSpec(model.id);
+		// contextWindow is the input budget: max_model_len minus the reserved output room.
 		const details = [
-			`${Math.round(model.contextWindow / 1000)}k ctx`,
+			`${formatTokens(model.contextWindow)} in + ${formatTokens(model.maxTokens)} out`,
 			model.input.includes("image") ? "text+image" : "text",
-			`max ${formatTokens(model.maxTokens)} out`,
 		];
 		if (spec) details.push(spec.note);
 		else details.push("unknown to this package, conservative defaults");

@@ -51,15 +51,18 @@ or `/model hetzner/...` inside a session. Commands:
 
 ## Models
 
-| Model | Context | Modalities | Agent loop | Architecture |
+| Model | Total tokens | Modalities | Agent loop | Architecture |
 | --- | --- | --- | --- | --- |
 | `Kimi-K2.7-Code` | 262k | text + image | yes | MoE 1T total / 32B active, code-tuned |
 | `DeepSeek-V4-Flash-0731` | 512k | text | yes | MoE 304B total / 13B active |
 | `Qwen/Qwen3.6-35B-A3B-FP8` | 262k | text + image | yes | MoE 35B total / 3B active |
 | `GLM-5.2-NVFP4` | 512k | text | untested | MoE 744B total / 40B active — see below |
 
-The context window is a *total* budget shared between input and output, which is what the API
-itself reports (`max_model_len=max_total_tokens`).
+That figure is the server's `max_model_len`, and it caps **input plus requested output together**:
+a 262k-token prompt is rejected if `max_tokens` is 16. So the context window pi is told about is
+`max_model_len - maxTokens` (229k input + 32k output for Kimi, by default). Without that reservation
+pi would consider a turn to fit that the server then refuses — recoverable, but a wasted round trip.
+Lower `maxTokens` if you would rather trade output room for input room.
 
 **GLM-5.2-NVFP4 did not answer a one-word prompt within 60 seconds** when probed on 2026-08-11.
 It is registered because the API lists it, but treat its availability as unproven — this is an
@@ -153,7 +156,8 @@ Results from 2026-08-11, on DeepSeek-V4-Flash, Qwen3.6-35B-A3B and Kimi-K2.7-Cod
 | `reasoning_content` | none of them |
 | `max_completion_tokens` | accepted (this package sends `max_tokens`) |
 | Rate-limit response headers | none sent |
-| First-token latency, trivial prompt | 0.9–1.3s |
+| Context-overflow error | matches pi's overflow patterns, so pi auto-compacts and retries |
+| Trivial prompt latency | 0.9–2.5s |
 
 So `src/catalog.ts` sets `reasoning: false`, `supportsUsageInStreaming: true`, image input only on
 Qwen and Kimi, and keeps the remaining OpenAI-platform compat flags off (`system` instead of

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { KNOWN_MODELS, mergeCatalog, staticCatalog, UNKNOWN_MODEL_DEFAULTS } from "../src/catalog.ts";
+import { DEFAULT_MAX_TOKENS, KNOWN_MODELS, mergeCatalog, staticCatalog, UNKNOWN_MODEL_DEFAULTS } from "../src/catalog.ts";
 
 test("static catalog covers every documented model", () => {
 	const models = staticCatalog();
@@ -20,7 +20,8 @@ test("reported ids keep their exact spelling but take metadata from the table", 
 	assert.equal(result.models.length, 1);
 	const [model] = result.models;
 	assert.equal(model?.id, "moonshotai/Kimi-K2.7-Code");
-	assert.equal(model?.contextWindow, 262_144);
+	// max_model_len 262144 minus the reserved output room.
+	assert.equal(model?.contextWindow, 262_144 - DEFAULT_MAX_TOKENS);
 	assert.deepEqual(model?.input, ["text", "image"]);
 	assert.deepEqual(result.unknownIds, []);
 });
@@ -29,9 +30,23 @@ test("unknown ids are registered with conservative defaults", () => {
 	const result = mergeCatalog(["Some-New-Model-2027"]);
 	assert.deepEqual(result.unknownIds, ["Some-New-Model-2027"]);
 	const [model] = result.models;
-	assert.equal(model?.contextWindow, UNKNOWN_MODEL_DEFAULTS.contextWindow);
+	assert.equal(model?.contextWindow, UNKNOWN_MODEL_DEFAULTS.totalTokens - DEFAULT_MAX_TOKENS);
 	assert.deepEqual(model?.input, ["text"]);
 	assert.equal(model?.reasoning, false);
+});
+
+test("output room is reserved so input plus maxTokens never exceeds max_model_len", () => {
+	for (const maxTokens of [1024, DEFAULT_MAX_TOKENS, 200_000]) {
+		const [model] = mergeCatalog(["Kimi-K2.7-Code"], { maxTokens }).models;
+		assert.ok(model);
+		assert.equal(model.contextWindow + model.maxTokens, 262_144);
+	}
+});
+
+test("an absurd maxTokens is clamped instead of erasing the context window", () => {
+	const [model] = mergeCatalog(["Kimi-K2.7-Code"], { maxTokens: 10_000_000 }).models;
+	assert.equal(model?.maxTokens, 131_072);
+	assert.equal(model?.contextWindow, 131_072);
 });
 
 test("models missing from the report are retired, not registered", () => {

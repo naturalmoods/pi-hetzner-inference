@@ -56,7 +56,7 @@ export const DEFAULT_MAX_TOKENS = 32_768;
 
 /** Defaults for a model id this package does not know yet. */
 export const UNKNOWN_MODEL_DEFAULTS = {
-	contextWindow: 128_000,
+	totalTokens: 128_000,
 	input: ["text"] as ("text" | "image")[],
 };
 
@@ -67,7 +67,11 @@ export interface ModelSpec {
 	name: string;
 	/** Matches the reported id, which may carry an org prefix or a version suffix. */
 	match: RegExp;
-	contextWindow: number;
+	/**
+	 * The server's `max_model_len`, which caps input *plus* requested output.
+	 * `contextWindow` is derived from it — see `toModelConfig`.
+	 */
+	totalTokens: number;
 	input: ("text" | "image")[];
 	/** Shown by `/hetzner models`. */
 	note: string;
@@ -89,7 +93,7 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		id: "Kimi-K2.7-Code",
 		name: "Kimi K2.7 Code (Hetzner)",
 		match: /kimi-k2(\.7)?-code/i,
-		contextWindow: 262_144,
+		totalTokens: 262_144,
 		input: ["text", "image"],
 		note: "MoE 1T total / 32B active, code-tuned; fastest to first token in probing",
 	},
@@ -97,7 +101,7 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		id: "GLM-5.2-NVFP4",
 		name: "GLM 5.2 (Hetzner)",
 		match: /glm-5(\.2)?/i,
-		contextWindow: 512_000,
+		totalTokens: 512_000,
 		input: ["text"],
 		note: "MoE 744B total / 40B active; did not answer within 60s when probed on 2026-08-11",
 	},
@@ -105,7 +109,7 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		id: "DeepSeek-V4-Flash-0731",
 		name: "DeepSeek V4 Flash (Hetzner)",
 		match: /deepseek-v4-flash/i,
-		contextWindow: 512_000,
+		totalTokens: 512_000,
 		input: ["text"],
 		note: "MoE 304B total / 13B active, text only",
 	},
@@ -113,7 +117,7 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		id: "Qwen/Qwen3.6-35B-A3B-FP8",
 		name: "Qwen3.6 35B A3B (Hetzner)",
 		match: /qwen3(\.6)?-35b-a3b/i,
-		contextWindow: 262_144,
+		totalTokens: 262_144,
 		input: ["text", "image"],
 		note: "MoE 35B total / 3B active",
 	},
@@ -123,19 +127,37 @@ export interface CatalogOptions {
 	maxTokens?: number;
 }
 
+/**
+ * Advertise the *input* budget as the context window.
+ *
+ * `max_model_len` caps input plus requested output together — the API rejects a
+ * request when `input + max_tokens` exceeds it, even if the input alone fits:
+ *
+ *   "This model's maximum context length is 262144 tokens. However, you requested
+ *    16 output tokens and your prompt contains at least 262129 input tokens, for
+ *    a total of at least 262145 tokens."
+ *
+ * Reporting the full `max_model_len` would leave a `maxTokens`-wide band where pi
+ * believes a turn fits but the server refuses it. pi recovers (it recognises that
+ * error and compacts, then retries), but the user pays for a wasted round trip.
+ * Reserving the output room up front makes pi's own accounting match reality, so
+ * threshold compaction happens before a request can fail.
+ */
 function toModelConfig(
 	id: string,
 	spec: ModelSpec | undefined,
 	options: CatalogOptions,
 ): ProviderModelConfig {
+	const totalTokens = spec?.totalTokens ?? UNKNOWN_MODEL_DEFAULTS.totalTokens;
+	const maxTokens = Math.min(options.maxTokens ?? DEFAULT_MAX_TOKENS, Math.floor(totalTokens / 2));
 	return {
 		id,
 		name: spec?.name ?? `${id} (Hetzner)`,
 		reasoning: false,
 		input: spec?.input ?? UNKNOWN_MODEL_DEFAULTS.input,
 		cost: FREE,
-		contextWindow: spec?.contextWindow ?? UNKNOWN_MODEL_DEFAULTS.contextWindow,
-		maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
+		contextWindow: totalTokens - maxTokens,
+		maxTokens,
 		compat: COMPAT,
 	};
 }

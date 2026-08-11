@@ -102,6 +102,16 @@ behaviour known to work. Users can flip individual models via `modelOverrides` w
 The probe also pinned the context windows from the server's own error text
 (`max_model_len=max_total_tokens=512000` / `262144`), confirming the documented numbers.
 
+### The advertised context window reserves output room
+
+`max_model_len` caps input **plus** requested output: a request whose prompt alone fits is still
+rejected when `input + max_tokens` exceeds it. Reporting the full figure as `contextWindow` would
+leave a `maxTokens`-wide band where pi thinks a turn fits and the server disagrees. pi does recover
+— its overflow patterns match this deployment's error text (verified with `--overflow`), so it
+compacts and retries — but that costs a wasted round trip on a large session. So `contextWindow` is
+`max_model_len - maxTokens`, and `maxTokens` is clamped to half of `max_model_len` to keep a
+misconfiguration from erasing the input budget.
+
 ### Rate limits: visibility, not control
 
 `turn_end` feeds assistant-message usage into a 60s sliding window (cached input counted as input,
@@ -133,16 +143,16 @@ Function calling, streaming usage, base64 image input, real model ids (the docum
 display names are the actual ids, only Qwen carries an org prefix) and the context windows are all
 settled — see [Compat flags](#compat-flags-follow-the-probe-not-guesswork).
 
+Context-overflow phrasing is settled too: the API answers with "This model's maximum context length
+is 262144 tokens. However, you requested … for a total of at least …", which matches pi's overflow
+patterns, so auto-compaction and retry work without a `message_end` normalizer.
+
 ## Open questions
 
 1. **GLM-5.2-NVFP4 availability** — it did not answer a one-word prompt within 60s on 2026-08-11.
    Registered because the API lists it, flagged in `/hetzner models`, and untested for everything
    else. Re-run `node scripts/probe.mjs --model GLM-5.2-NVFP4 --timeout 300000`.
-2. **Context-overflow phrasing** — pi auto-compacts and retries only when it recognises the error
-   text. `npm run probe -- --overflow` sends a genuinely oversized prompt and reports whether the
-   message matches pi's patterns. If it does not, add a `message_end` normalizer that prefixes
-   `context_length_exceeded:` (scoped to this provider, and never to rate-limit errors).
-3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
+2. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
-4. **Publishing** — `repository`/`homepage` are unset in `package.json` and should point at the
+3. **Publishing** — `repository`/`homepage` are unset in `package.json` and should point at the
    public repo before `npm publish`.
