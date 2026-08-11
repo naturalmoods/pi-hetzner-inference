@@ -91,10 +91,10 @@ upgrading fixes a wrong context window immediately instead of waiting for a cach
 
 ### Compat flags follow the probe, not guesswork
 
-Measured on 2026-08-11: function calling and forced `tool_choice` work, tool results replay,
-streaming carries usage (`supportsUsageInStreaming: true`), no model returns `reasoning_content`
-(`reasoning: false`), DeepSeek rejects image content while Qwen and Kimi accept base64 `data:`
-URIs, and both `max_tokens` and `max_completion_tokens` are accepted. The rest
+Measured on 2026-08-11 against all four models: function calling and forced `tool_choice` work,
+tool results replay, streaming carries usage (`supportsUsageInStreaming: true`), no model returns
+`reasoning_content` (`reasoning: false`), DeepSeek and GLM reject image content while Qwen and Kimi
+accept base64 `data:` URIs, and both `max_tokens` and `max_completion_tokens` are accepted. The rest
 (`supportsDeveloperRole`, `supportsStore`, `supportsStrictMode`, `supportsOpenAIGrammarTools`) stay
 `false`: they are OpenAI platform features that were not exercised, and `false` selects the
 behaviour known to work. Users can flip individual models via `modelOverrides` without patching.
@@ -149,10 +149,15 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
 
 ## Open questions
 
-1. **GLM-5.2-NVFP4 availability** — it did not answer a one-word prompt within 60s on 2026-08-11.
-   Registered because the API lists it, flagged in `/hetzner models`, and untested for everything
-   else. Re-run `node scripts/probe.mjs --model GLM-5.2-NVFP4 --timeout 300000`.
-2. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
+1. **Empty `content` on a tight output budget** — with `max_tokens: 32`, Qwen and GLM returned no
+   visible text while DeepSeek and Kimi answered normally, and none of them set `reasoning_content`.
+   If the missing output turns out to be inline `<think>` tags, those two models need
+   `compat.thinkingFormat` (or `requiresThinkingAsText`) so pi does not render thinking as prose.
+   `scripts/probe.mjs` now measures this with a 512-token budget.
+2. **Latency variance** — GLM-5.2-NVFP4 exceeded a 60s timeout on one run and answered in 2.3s on
+   the next. Nothing to fix in the extension; noted in `/hetzner models` so a stalled turn is not
+   mistaken for a bug.
+3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
-3. **Publishing** — `repository`/`homepage` are unset in `package.json` and should point at the
+4. **Publishing** — `repository`/`homepage` are unset in `package.json` and should point at the
    public repo before `npm publish`.

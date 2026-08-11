@@ -56,7 +56,7 @@ or `/model hetzner/...` inside a session. Commands:
 | `Kimi-K2.7-Code` | 262k | text + image | yes | MoE 1T total / 32B active, code-tuned |
 | `DeepSeek-V4-Flash-0731` | 512k | text | yes | MoE 304B total / 13B active |
 | `Qwen/Qwen3.6-35B-A3B-FP8` | 262k | text + image | yes | MoE 35B total / 3B active |
-| `GLM-5.2-NVFP4` | 512k | text | untested | MoE 744B total / 40B active — see below |
+| `GLM-5.2-NVFP4` | 512k | text | yes | MoE 744B total / 40B active |
 
 That figure is the server's `max_model_len`, and it caps **input plus requested output together**:
 a 262k-token prompt is rejected if `max_tokens` is 16. So the context window pi is told about is
@@ -64,13 +64,9 @@ a 262k-token prompt is rejected if `max_tokens` is 16. So the context window pi 
 pi would consider a turn to fit that the server then refuses — recoverable, but a wasted round trip.
 Lower `maxTokens` if you would rather trade output room for input room.
 
-**GLM-5.2-NVFP4 did not answer a one-word prompt within 60 seconds** when probed on 2026-08-11.
-It is registered because the API lists it, but treat its availability as unproven — this is an
-experimental platform. Re-check with:
-
-```bash
-node scripts/probe.mjs --model GLM-5.2-NVFP4 --timeout 300000
-```
+**Latency is uneven.** GLM-5.2-NVFP4 failed to answer a one-word prompt within 60 seconds on one
+run and answered in 2.3 seconds on the next. Expect that from an experimental platform, and re-check
+any model with `node scripts/probe.mjs --model <id> --timeout 300000`.
 
 `/v1/models` returns ids only, so the metadata above lives in `src/catalog.ts` and is overlaid
 onto whatever the endpoint reports. An id this package does not recognise is still registered,
@@ -143,21 +139,27 @@ HETZNER_INFERENCE_API_KEY=<token> npm run probe
 npm run probe -- --overflow          # also verifies pi's auto-compaction path (~2MB per model)
 ```
 
-Results from 2026-08-11, on DeepSeek-V4-Flash, Qwen3.6-35B-A3B and Kimi-K2.7-Code
-(GLM-5.2-NVFP4 timed out before it could be measured):
+Results from 2026-08-11, all four models:
 
 | Capability | Result |
 | --- | --- |
-| `tools` accepted, tool call emitted | yes — all three |
+| `tools` accepted, tool call emitted | yes — all four |
 | Forced `tool_choice` | yes |
 | Tool-result round trip | yes |
 | Streaming | yes, with usage in the stream |
-| Base64 `data:` image input | Qwen and Kimi yes; DeepSeek rejects it as "not a multimodal model" |
+| Base64 `data:` image input | Qwen and Kimi yes; DeepSeek and GLM reject it as "not a multimodal model" |
 | `reasoning_content` | none of them |
 | `max_completion_tokens` | accepted (this package sends `max_tokens`) |
 | Rate-limit response headers | none sent |
 | Context-overflow error | matches pi's overflow patterns, so pi auto-compacts and retries |
-| Trivial prompt latency | 0.9–2.5s |
+| Trivial prompt latency | 0.9–2.5s, with one >60s outlier on GLM |
+
+One loose end: on a 32-token budget, Qwen and GLM returned an **empty `content`** while DeepSeek and
+Kimi answered "ready", and no model set `reasoning_content`. Either those two spend the budget on
+inline thinking or they are simply slower to get to the point. The probe now checks this with a
+512-token budget and reports `finish_reason`, the billed output tokens and any `<think>` tags — if
+tags do show up, the fix is a `compat.thinkingFormat` / `requiresThinkingAsText` entry in
+`src/catalog.ts`, since otherwise pi renders them as ordinary text.
 
 So `src/catalog.ts` sets `reasoning: false`, `supportsUsageInStreaming: true`, image input only on
 Qwen and Kimi, and keeps the remaining OpenAI-platform compat flags off (`system` instead of

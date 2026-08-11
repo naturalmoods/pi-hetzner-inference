@@ -29,8 +29,7 @@ const FREE: ProviderModelConfig["cost"] = { input: 0, output: 0, cacheRead: 0, c
 /**
  * Compat flags for this deployment.
  *
- * Measured with `scripts/probe.mjs` on 2026-08-11 against DeepSeek-V4-Flash,
- * Qwen3.6-35B-A3B and Kimi-K2.7-Code (see README):
+ * Measured with `scripts/probe.mjs` on 2026-08-11 against all four models (see README):
  * - Function calling works: `tools`, forced `tool_choice`, and tool-result
  *   replay all behave, so these models can drive pi's agent loop.
  * - Streaming returns usage, hence `supportsUsageInStreaming`.
@@ -85,8 +84,8 @@ export interface ModelSpec {
  * `262144` for Qwen and Kimi. Note that this is a *total* budget shared between
  * input and output, which is why `maxTokens` stays well below it.
  *
- * Modalities are probe results, not guesses: DeepSeek rejects image content with
- * "is not a multimodal model", while Qwen and Kimi accept base64 `data:` URIs.
+ * Modalities are probe results, not guesses: DeepSeek and GLM reject image content
+ * with "is not a multimodal model", while Qwen and Kimi accept base64 `data:` URIs.
  */
 export const KNOWN_MODELS: readonly ModelSpec[] = [
 	{
@@ -103,7 +102,7 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		match: /glm-5(\.2)?/i,
 		totalTokens: 512_000,
 		input: ["text"],
-		note: "MoE 744B total / 40B active; did not answer within 60s when probed on 2026-08-11",
+		note: "MoE 744B total / 40B active, text only; latency varied from 2.3s to >60s across probes",
 	},
 	{
 		id: "DeepSeek-V4-Flash-0731",

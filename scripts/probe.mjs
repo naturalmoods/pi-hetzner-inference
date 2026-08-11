@@ -303,7 +303,35 @@ async function probeContextOverflow(model) {
 		status: result.status,
 		timedOut: result.timedOut,
 		message: short(message, 300),
-		recognisedByPi: PI_OVERFLOW_PATTERNS.some((pattern) => pattern.test(String(message))),
+		// A timeout says nothing about the error text, so stay undefined rather
+		// than reporting a false negative.
+		recognisedByPi: result.timedOut ? undefined : PI_OVERFLOW_PATTERNS.some((pattern) => pattern.test(String(message))),
+	};
+}
+
+/**
+ * Some hybrid-reasoning models answer with an empty `content` on a short
+ * `max_tokens` budget: the visible answer never arrives because thinking
+ * consumed it, either inline as `<think>` tags or on a separate channel. That
+ * changes how pi must be configured, so measure it with a roomier budget.
+ */
+async function probeVisibleOutput(model) {
+	const result = await call("/chat/completions", {
+		model,
+		max_tokens: 512,
+		messages: [{ role: "user", content: "Reply with exactly one word: ready" }],
+	});
+	const message = result.json?.choices?.[0]?.message;
+	const content = message?.content ?? "";
+	return {
+		ok: result.ok,
+		error: result.ok ? undefined : short(result.text, 200),
+		finishReason: result.json?.choices?.[0]?.finish_reason,
+		contentLength: content.length,
+		preview: short(content, 120),
+		thinkTags: /<\/?(think|thinking|reasoning|thought)\b/i.test(content),
+		reasoningContent: message?.reasoning_content !== undefined,
+		outputTokens: result.json?.usage?.completion_tokens,
 	};
 }
 
@@ -326,6 +354,21 @@ for (const model of models) {
 	}
 	console.log(`  chat                     ok in ${entry.chat.ms}ms — "${entry.chat.reply}"`);
 	console.log(`  reasoning_content        ${mark(entry.chat.reasoningContent)}`);
+
+	entry.visibleOutput = await probeVisibleOutput(model);
+	if (entry.visibleOutput.ok) {
+		const visible = entry.visibleOutput;
+		console.log(
+			`  visible answer (512 tok) ${visible.contentLength > 0 ? `"${visible.preview}"` : "EMPTY"}` +
+				` [finish: ${visible.finishReason}, ${visible.outputTokens} output tokens]`,
+		);
+		if (visible.thinkTags) console.log(`  inline think tags        yes — pi needs compat.thinkingFormat / requiresThinkingAsText`);
+		if (visible.contentLength === 0) {
+			console.log(`  ! empty content with ${visible.outputTokens} output tokens billed — output goes somewhere pi cannot see`);
+		}
+	} else {
+		console.log(`  visible answer (512 tok) FAILED — ${entry.visibleOutput.error}`);
+	}
 
 	entry.tools = await probeTools(model);
 	console.log(`  tools accepted           ${mark(entry.tools.accepted)}${entry.tools.error ? ` — ${entry.tools.error}` : ""}`);
@@ -358,8 +401,13 @@ for (const model of models) {
 
 	if (args.includes("--overflow")) {
 		entry.contextOverflow = await probeContextOverflow(model);
-		console.log(`  context overflow error   HTTP ${entry.contextOverflow.status} — ${entry.contextOverflow.message}`);
-		console.log(`  pi recognises overflow   ${mark(entry.contextOverflow.recognisedByPi)}`);
+		if (entry.contextOverflow.timedOut) {
+			console.log(`  context overflow         inconclusive — the oversized request timed out, not the API's fault`);
+			console.log(`                           retry with: node scripts/probe.mjs --overflow --model ${model} --timeout 300000`);
+		} else {
+			console.log(`  context overflow error   HTTP ${entry.contextOverflow.status} — ${entry.contextOverflow.message}`);
+			console.log(`  pi recognises overflow   ${mark(entry.contextOverflow.recognisedByPi)}`);
+		}
 	}
 
 	const limits = Object.entries(entry.chat.rateLimitHeaders);
