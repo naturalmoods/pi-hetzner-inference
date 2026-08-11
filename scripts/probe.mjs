@@ -148,13 +148,59 @@ async function probeChat(model) {
 }
 
 async function probeMaxCompletionTokens(model) {
-	// If this is accepted, `maxTokensField: "max_completion_tokens"` is also an option.
+	// Not uniform across this deployment: rejected by GLM, accepted by the others.
+	// That is why the extension pins `maxTokensField: "max_tokens"`.
 	const result = await call("/chat/completions", {
 		model,
-		max_completion_tokens: 16,
+		max_completion_tokens: 512,
 		messages: [{ role: "user", content: "Say: ok" }],
 	});
-	return { ok: result.ok, status: result.status, error: result.ok ? undefined : short(result.text, 120) };
+	return { ok: result.ok, status: result.status, error: result.ok ? undefined : short(result.text, 200) };
+}
+
+/**
+ * Locate the output tokens that are billed but never shown.
+ *
+ * GLM and Qwen charge ~100-230 output tokens for a one-word answer while
+ * `content` holds only the answer and `reasoning_content` is absent. Either the
+ * server strips a thinking block, or it lives under a field name this probe does
+ * not know. Dumping the raw message keys and a streaming delta settles it — and
+ * if a thinking channel does exist, pi can be told about it via `compat`.
+ */
+async function probeHiddenOutput(model) {
+	const nonStreaming = await call("/chat/completions", {
+		model,
+		max_tokens: 512,
+		messages: [{ role: "user", content: "Reply with exactly one word: ready" }],
+	});
+	const message = nonStreaming.json?.choices?.[0]?.message ?? {};
+	const streaming = await call(
+		"/chat/completions",
+		{
+			model,
+			max_tokens: 512,
+			stream: true,
+			messages: [{ role: "user", content: "Reply with exactly one word: ready" }],
+		},
+		{ stream: true },
+	);
+	const deltaKeys = new Set();
+	for (const line of streaming.text.split("\n")) {
+		if (!line.startsWith("data:")) continue;
+		try {
+			const delta = JSON.parse(line.slice(5).trim())?.choices?.[0]?.delta;
+			for (const key of Object.keys(delta ?? {})) deltaKeys.add(key);
+		} catch {
+			/* [DONE] and keepalives are not JSON */
+		}
+	}
+	return {
+		messageKeys: Object.keys(message),
+		rawMessage: short(JSON.stringify(message), 300),
+		deltaKeys: [...deltaKeys],
+		outputTokens: nonStreaming.json?.usage?.completion_tokens,
+		contentLength: (message.content ?? "").length,
+	};
 }
 
 const WEATHER_TOOL = {
@@ -363,8 +409,15 @@ for (const model of models) {
 				` [finish: ${visible.finishReason}, ${visible.outputTokens} output tokens]`,
 		);
 		if (visible.thinkTags) console.log(`  inline think tags        yes — pi needs compat.thinkingFormat / requiresThinkingAsText`);
-		if (visible.contentLength === 0) {
-			console.log(`  ! empty content with ${visible.outputTokens} output tokens billed — output goes somewhere pi cannot see`);
+
+		// A one-word answer that costs many output tokens means hidden work.
+		if (visible.outputTokens > 4 * Math.max(1, Math.ceil(visible.contentLength / 4))) {
+			const hidden = await probeHiddenOutput(model);
+			entry.hiddenOutput = hidden;
+			console.log(`  hidden output tokens     ${hidden.outputTokens} billed for ${hidden.contentLength} chars of content`);
+			console.log(`  message fields           ${hidden.messageKeys.join(", ") || "none"}`);
+			console.log(`  stream delta fields      ${hidden.deltaKeys.join(", ") || "none"}`);
+			console.log(`  raw message              ${hidden.rawMessage}`);
 		}
 	} else {
 		console.log(`  visible answer (512 tok) FAILED — ${entry.visibleOutput.error}`);
@@ -394,7 +447,10 @@ for (const model of models) {
 	console.log(`  base64 image input       ${mark(entry.image.ok)}${entry.image.error ? ` — ${entry.image.error}` : ` — "${entry.image.reply}"`}`);
 
 	entry.maxCompletionTokens = await probeMaxCompletionTokens(model);
-	console.log(`  max_completion_tokens    ${mark(entry.maxCompletionTokens.ok)}`);
+	console.log(
+		`  max_completion_tokens    ${mark(entry.maxCompletionTokens.ok)}` +
+			`${entry.maxCompletionTokens.error ? ` — ${entry.maxCompletionTokens.error}` : ""}`,
+	);
 
 	entry.maxTokensCeiling = await probeMaxTokensCeiling(model);
 	console.log(`  max_tokens ceiling       HTTP ${entry.maxTokensCeiling.status} — ${entry.maxTokensCeiling.message}`);

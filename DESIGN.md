@@ -93,11 +93,16 @@ upgrading fixes a wrong context window immediately instead of waiting for a cach
 
 Measured on 2026-08-11 against all four models: function calling and forced `tool_choice` work,
 tool results replay, streaming carries usage (`supportsUsageInStreaming: true`), no model returns
-`reasoning_content` (`reasoning: false`), DeepSeek and GLM reject image content while Qwen and Kimi
-accept base64 `data:` URIs, and both `max_tokens` and `max_completion_tokens` are accepted. The rest
-(`supportsDeveloperRole`, `supportsStore`, `supportsStrictMode`, `supportsOpenAIGrammarTools`) stay
-`false`: they are OpenAI platform features that were not exercised, and `false` selects the
-behaviour known to work. Users can flip individual models via `modelOverrides` without patching.
+`reasoning_content` (`reasoning: false`), and DeepSeek and GLM reject image content while Qwen and
+Kimi accept base64 `data:` URIs. The rest (`supportsDeveloperRole`, `supportsStore`,
+`supportsStrictMode`, `supportsOpenAIGrammarTools`) stay `false`: they are OpenAI platform features
+that were not exercised, and `false` selects the behaviour known to work. Users can flip individual
+models via `modelOverrides` without patching.
+
+`maxTokensField: "max_tokens"` is the one flag that is load-bearing rather than cautious: GLM-5.2
+rejects `max_completion_tokens` while the other three accept it, so pi's default would break that
+model. The deployment is not uniform, which is a good argument for keeping every compat decision
+tied to a probe result.
 
 The probe also pinned the context windows from the server's own error text
 (`max_model_len=max_total_tokens=512000` / `262144`), confirming the documented numbers.
@@ -149,14 +154,15 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
 
 ## Open questions
 
-1. **Empty `content` on a tight output budget** — with `max_tokens: 32`, Qwen and GLM returned no
-   visible text while DeepSeek and Kimi answered normally, and none of them set `reasoning_content`.
-   If the missing output turns out to be inline `<think>` tags, those two models need
-   `compat.thinkingFormat` (or `requiresThinkingAsText`) so pi does not render thinking as prose.
-   `scripts/probe.mjs` now measures this with a 512-token budget.
-2. **Latency variance** — GLM-5.2-NVFP4 exceeded a 60s timeout on one run and answered in 2.3s on
-   the next. Nothing to fix in the extension; noted in `/hetzner models` so a stalled turn is not
-   mistaken for a bug.
+1. **Where the withheld output tokens go** — Qwen and GLM bill 232 and 101 output tokens for a
+   one-word answer with `finish_reason: "stop"`, no `<think>` tags in `content` and no
+   `reasoning_content`. A thinking block is charged and then withheld. Mitigated by the
+   `MIN_MAX_TOKENS` floor (a 32-token budget produced empty replies) and harmless for accounting,
+   since the tracker reads billed usage. If the probe's raw-field dump ever reveals a thinking
+   channel, `reasoning: true` plus the matching `thinkingFormat` becomes possible.
+2. **Latency variance** — GLM-5.2-NVFP4 took 2.3s, 45s and >60s on the same one-word prompt across
+   three runs. Nothing to fix in the extension; noted in `/hetzner models` so a stalled turn is not
+   mistaken for a bug. It is a weak choice for interactive work.
 3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
 4. **Publishing** — `repository`/`homepage` are unset in `package.json` and should point at the

@@ -36,10 +36,12 @@ const FREE: ProviderModelConfig["cost"] = { input: 0, output: 0, cacheRead: 0, c
  * - No model returns `reasoning_content`, so `reasoning` stays false. Turn it on
  *   per model with `modelOverrides` in `~/.pi/agent/models.json` if that changes.
  *
+ * `maxTokensField: "max_tokens"` is load-bearing, not merely cautious: three
+ * models accept `max_completion_tokens`, but GLM-5.2-NVFP4 rejects it. pi's
+ * default would break that model outright. `max_tokens` works everywhere.
+ *
  * The remaining flags stay off because they are OpenAI platform features that
  * were not verified here; `false` falls back to behaviour that is known to work.
- * `max_completion_tokens` is also accepted, but `max_tokens` is what the probe
- * exercised, so it is what we pin.
  */
 const COMPAT: ProviderModelConfig["compat"] = {
 	supportsDeveloperRole: false,
@@ -52,6 +54,18 @@ const COMPAT: ProviderModelConfig["compat"] = {
 
 /** Default output cap. One response stays well inside the 200k/60s output budget. */
 export const DEFAULT_MAX_TOKENS = 32_768;
+
+/**
+ * Floor for the output cap.
+ *
+ * GLM and Qwen bill output tokens that never appear in the response: a one-word
+ * answer cost 101 and 232 tokens respectively, with `finish_reason: "stop"`,
+ * nothing in `content` beyond the answer and no `reasoning_content`. On a
+ * 32-token budget that hidden work consumed everything and the reply came back
+ * empty. A floor keeps a small `maxTokens` setting from producing silent
+ * non-answers.
+ */
+export const MIN_MAX_TOKENS = 2_048;
 
 /** Defaults for a model id this package does not know yet. */
 export const UNKNOWN_MODEL_DEFAULTS = {
@@ -102,7 +116,7 @@ export const KNOWN_MODELS: readonly ModelSpec[] = [
 		match: /glm-5(\.2)?/i,
 		totalTokens: 512_000,
 		input: ["text"],
-		note: "MoE 744B total / 40B active, text only; latency varied from 2.3s to >60s across probes",
+		note: "MoE 744B total / 40B active, text only; latency ranged from 2.3s to 45s to >60s on a one-word prompt",
 	},
 	{
 		id: "DeepSeek-V4-Flash-0731",
@@ -148,7 +162,10 @@ function toModelConfig(
 	options: CatalogOptions,
 ): ProviderModelConfig {
 	const totalTokens = spec?.totalTokens ?? UNKNOWN_MODEL_DEFAULTS.totalTokens;
-	const maxTokens = Math.min(options.maxTokens ?? DEFAULT_MAX_TOKENS, Math.floor(totalTokens / 2));
+	const maxTokens = Math.min(
+		Math.max(options.maxTokens ?? DEFAULT_MAX_TOKENS, MIN_MAX_TOKENS),
+		Math.floor(totalTokens / 2),
+	);
 	return {
 		id,
 		name: spec?.name ?? `${id} (Hetzner)`,

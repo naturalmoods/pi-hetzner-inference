@@ -149,17 +149,24 @@ Results from 2026-08-11, all four models:
 | Streaming | yes, with usage in the stream |
 | Base64 `data:` image input | Qwen and Kimi yes; DeepSeek and GLM reject it as "not a multimodal model" |
 | `reasoning_content` | none of them |
-| `max_completion_tokens` | accepted (this package sends `max_tokens`) |
+| `max_completion_tokens` | **GLM rejects it**; the others accept it — so this package sends `max_tokens` |
 | Rate-limit response headers | none sent |
 | Context-overflow error | matches pi's overflow patterns, so pi auto-compacts and retries |
-| Trivial prompt latency | 0.9–2.5s, with one >60s outlier on GLM |
+| Trivial prompt latency | 0.9–2.5s, with 45s and >60s outliers on GLM |
 
-One loose end: on a 32-token budget, Qwen and GLM returned an **empty `content`** while DeepSeek and
-Kimi answered "ready", and no model set `reasoning_content`. Either those two spend the budget on
-inline thinking or they are simply slower to get to the point. The probe now checks this with a
-512-token budget and reports `finish_reason`, the billed output tokens and any `<think>` tags — if
-tags do show up, the fix is a `compat.thinkingFormat` / `requiresThinkingAsText` entry in
-`src/catalog.ts`, since otherwise pi renders them as ordinary text.
+Two consequences worth knowing:
+
+**GLM rejects `max_completion_tokens`.** pi's default field would break that model outright, which
+is why `maxTokensField: "max_tokens"` is pinned rather than left to the default. The deployment is
+not uniform across models.
+
+**Qwen and GLM bill output tokens you never see.** A one-word answer cost 232 and 101 output tokens
+respectively, with `finish_reason: "stop"`, only the answer in `content` and no `reasoning_content` —
+so a thinking block is being charged and then withheld. On a 32-token budget that hidden work
+consumed everything and the reply came back empty. Hence `maxTokens` has a 2048-token floor, and the
+rate-limit tracker counts the real (billed) output, not the visible text. `npm run probe` dumps the
+raw message and streaming delta fields when it sees this, in case a thinking channel turns up that
+pi could be told about.
 
 So `src/catalog.ts` sets `reasoning: false`, `supportsUsageInStreaming: true`, image input only on
 Qwen and Kimi, and keeps the remaining OpenAI-platform compat flags off (`system` instead of

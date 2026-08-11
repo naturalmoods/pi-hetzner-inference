@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_MAX_TOKENS, KNOWN_MODELS, mergeCatalog, staticCatalog, UNKNOWN_MODEL_DEFAULTS } from "../src/catalog.ts";
+import {
+	DEFAULT_MAX_TOKENS,
+	KNOWN_MODELS,
+	MIN_MAX_TOKENS,
+	mergeCatalog,
+	staticCatalog,
+	UNKNOWN_MODEL_DEFAULTS,
+} from "../src/catalog.ts";
 
 test("static catalog covers every documented model", () => {
 	const models = staticCatalog();
@@ -47,6 +54,11 @@ test("an absurd maxTokens is clamped instead of erasing the context window", () 
 	const [model] = mergeCatalog(["Kimi-K2.7-Code"], { maxTokens: 10_000_000 }).models;
 	assert.equal(model?.maxTokens, 131_072);
 	assert.equal(model?.contextWindow, 131_072);
+});
+
+test("a tiny maxTokens is raised to the floor that hidden thinking needs", () => {
+	const [model] = mergeCatalog(["Kimi-K2.7-Code"], { maxTokens: 64 }).models;
+	assert.equal(model?.maxTokens, MIN_MAX_TOKENS);
 });
 
 test("models missing from the report are retired, not registered", () => {
