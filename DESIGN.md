@@ -216,7 +216,7 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
    ever appears, `cacheControlFormat` may become relevant.
 4. **Publishing** — the source is public at
    [naturalmoods/pi-hetzner-inference](https://github.com/naturalmoods/pi-hetzner-inference) and
-   `repository`/`homepage`/`bugs` point at it. Not yet on npm: `CHANGELOG.md` still says
-   `0.1.0 — unreleased`, which wants a date, and `npm pack --dry-run` is worth a look first to confirm
-   the `files` list ships `src` and `scripts` and nothing else. `--provenance` needs a CI run to mean
-   anything, so a local publish should omit it.
+   `repository`/`homepage`/`bugs` point at it. Not yet on npm; the name is free and
+   `npm pack --dry-run` ships the intended 14 files (src, scripts, README, LICENSE, CHANGELOG — no
+   tests, no `DESIGN.md`). `--provenance` needs a CI run to mean anything, so a local publish should
+   omit it.
