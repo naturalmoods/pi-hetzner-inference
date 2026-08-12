@@ -219,7 +219,13 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
    `--timeout 300000`.
 3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
-4. **0.1.0 has no provenance** — it was published by hand before the release workflow existed, so it is
+4. **`hetzner_ask` has never run with the thinking switch live** — the probe measured the request shape
+   (sending the model's measured `chat_template_kwargs` key empties the `reasoning` field), and a unit
+   test pins which key each model gets, but no delegated call has been made through the tool itself
+   since. To check: `/hetzner ask on`, `/reload`, then a summarising call — the tool result carries
+   `details.usage.output` and `details.thinking`, and the output count should be far lower than it was
+   when the delegate was still paying for reasoning.
+5. **0.1.0 has no provenance** — it was published by hand before the release workflow existed, so it is
    the one version whose tarball cannot be tied back to a commit. Nothing to fix: republishing under the
    same version is impossible by design, and 0.1.1 supersedes it. Worth knowing only if someone audits
    the older release and finds the attestation missing.

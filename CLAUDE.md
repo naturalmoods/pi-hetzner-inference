@@ -32,11 +32,25 @@ npm run probe -- --model GLM-5.2-NVFP4 --timeout 300000
 declares that floor (`>=22.6`, where the feature landed), so keep both in step. The probe is
 deliberately absent from CI: it needs a live token and the rate limits are per key.
 
-Releasing is a tag push: bump `version` in `package.json`, date the section in `CHANGELOG.md`, then
-`git tag -a vX.Y.Z && git push origin vX.Y.Z`. `.github/workflows/release.yml` runs typecheck and
-tests, refuses to continue if the tag and `package.json` disagree, publishes with `--provenance` over
-OIDC (no npm token in secrets), and opens a GitHub Release from the matching changelog section. GLM
-needs `--timeout 300000` when re-probing before a release; the default 60s is not enough for it.
+Releasing is a tag push, and never a manual `npm publish` — the account's 2FA is `auth-and-writes`, so
+publishing by hand needs an OTP at a real terminal and produces a tarball with no provenance (0.1.0 is
+the one such version). The sequence:
+
+1. `npm run probe` with a token exported — a compat flag can go stale between releases, see **Open
+   questions** in `DESIGN.md`. GLM needs `--timeout 300000`; the default 60s is not enough for it
+2. bump `version` in `package.json`, then `npm install --package-lock-only` so the lockfile follows
+3. date the `## Unreleased` heading in `CHANGELOG.md` — the workflow lifts the release notes from the
+   section whose heading starts with the version, so a missing section means empty notes
+4. commit, push, wait for green CI
+5. `git tag -a vX.Y.Z -m "X.Y.Z" && git push origin vX.Y.Z` — **both halves**; a tag that exists only
+   locally triggers nothing, which has happened
+6. verify: `gh run view` for the steps, then `npm install pi-hetzner-inference@X.Y.Z` in a scratch dir
+   and `npm audit signatures`, which must report a verified attestation
+
+`.github/workflows/release.yml` runs typecheck and tests, refuses to continue if the tag and
+`package.json` disagree, publishes with `--provenance` over OIDC (no npm token in secrets), and opens a
+GitHub Release from the changelog section. `workflow_dispatch` re-runs a failed release on an existing
+tag without moving it.
 
 Tests run TypeScript through `--experimental-strip-types`, so `.ts` extensions in imports are
 mandatory (`allowImportingTsExtensions` + `verbatimModuleSyntax` are on). `tsconfig.json` sets
