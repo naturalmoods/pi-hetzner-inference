@@ -214,10 +214,11 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
    `--timeout 300000`.
 3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
-4. **Trusted publishing is not switched on yet** — `.github/workflows/release.yml` publishes on a `v*`
-   tag and authenticates over OIDC rather than with a stored npm token, which also produces the
-   provenance attestation. The npm side is a one-time manual step that has not been done: npmjs.com →
-   the package → Settings → Trusted publisher → this repo and `release.yml`. Until then the workflow's
-   publish step fails on auth and uploads nothing, which is the safe direction to fail in. 0.1.0 itself
-   was published by hand with an OTP, so it carries no provenance; 0.1.1 will be the first release to
-   have one.
+4. **The release path has never been run** — `.github/workflows/release.yml` publishes on a `v*` tag and
+   authenticates over OIDC rather than with a stored npm token, which also produces the provenance
+   attestation. The npm-side trusted publisher was configured on 2026-08-12 (this repo, `release.yml`),
+   but nothing has exercised it: the workflow's logic was checked locally — YAML, changelog extraction,
+   and the tag/`package.json` guard in both directions — while the publish step itself is unverified,
+   and OIDC misconfiguration surfaces only as an auth failure at that step. 0.1.0 was published by hand
+   with an OTP and carries no provenance, so the first tagged release both proves the path and produces
+   the first attested tarball.
