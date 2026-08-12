@@ -37,6 +37,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
 
       # Trusted publishing needs npm 11.5.1 or newer; the bundled version varies
       # with the Node image, so pin the behaviour rather than inherit it.

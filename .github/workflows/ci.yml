@@ -1,0 +1,48 @@
+# Typecheck and tests on every push and pull request.
+#
+# No network: `npm test` is offline by construction and `scripts/probe.mjs` is
+# deliberately not run here. The probe needs a live API token, and the service's
+# rate limits are per key over a 60s window — a CI job hitting them would spend
+# the same budget a real session needs, and would fail for reasons that say
+# nothing about the change under test.
+#
+# Two Node versions because pi loads this package's TypeScript directly and the
+# tests run it through `--experimental-strip-types`: 22 is the oldest line that
+# supports it, 24 is what the release workflow publishes from.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+# A newer push to the same branch makes an in-flight run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      # One version failing should not hide the result of the other.
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test

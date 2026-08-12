@@ -27,6 +27,10 @@ npm run probe -- --overflow                     # + a ~2MB request per model (ve
 npm run probe -- --model GLM-5.2-NVFP4 --timeout 300000
 ```
 
+`.github/workflows/ci.yml` runs typecheck and tests on Node 22 and 24 for every push and pull request
+— 22 is the oldest line whose `--experimental-strip-types` the tests rely on, so keep it working. The
+probe is deliberately absent from CI: it needs a live token and the rate limits are per key.
+
 Releasing is a tag push: bump `version` in `package.json`, date the section in `CHANGELOG.md`, then
 `git tag -a vX.Y.Z && git push origin vX.Y.Z`. `.github/workflows/release.yml` runs typecheck and
 tests, refuses to continue if the tag and `package.json` disagree, publishes with `--provenance` over
