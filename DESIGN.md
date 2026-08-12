@@ -214,9 +214,9 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
    `--timeout 300000`.
 3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
-4. **Publishing** — the source is public at
-   [naturalmoods/pi-hetzner-inference](https://github.com/naturalmoods/pi-hetzner-inference) and
-   `repository`/`homepage`/`bugs` point at it. Not yet on npm; the name is free and
-   `npm pack --dry-run` ships the intended 14 files (src, scripts, README, LICENSE, CHANGELOG — no
-   tests, no `DESIGN.md`). `--provenance` needs a CI run to mean anything, so a local publish should
-   omit it.
+4. **Releasing without a CI path** — 0.1.0 was published by hand (`npm publish` with an OTP, tagged
+   `v0.1.0`). That works, but the account now has `auth-and-writes` 2FA, so every release needs a code
+   typed at a TTY, and `--provenance` — which binds the tarball to the commit it was built from — is
+   only meaningful from CI. A release workflow using a granular token with bypass-2FA would give both,
+   and would also be the natural place to run the probe-baseline diff from question 1. Not worth it
+   until there is a second release to make.
