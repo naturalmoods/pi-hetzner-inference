@@ -12,6 +12,9 @@
   "bugs": {
     "url": "https://github.com/naturalmoods/pi-hetzner-inference/issues"
   },
+  "engines": {
+    "node": ">=22.6"
+  },
   "keywords": [
     "pi-package",
     "pi",

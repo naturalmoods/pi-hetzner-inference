@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Declare `engines.node: ">=22.6"`. That is where Node's type stripping landed, which is what lets pi
+  load this package's TypeScript sources directly; below it the failure was silent
+
 ## 0.1.0 — 2026-08-12
 
 Initial release.
