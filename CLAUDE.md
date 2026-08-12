@@ -27,6 +27,12 @@ npm run probe -- --overflow                     # + a ~2MB request per model (ve
 npm run probe -- --model GLM-5.2-NVFP4 --timeout 300000
 ```
 
+Releasing is a tag push: bump `version` in `package.json`, date the section in `CHANGELOG.md`, then
+`git tag -a vX.Y.Z && git push origin vX.Y.Z`. `.github/workflows/release.yml` runs typecheck and
+tests, refuses to continue if the tag and `package.json` disagree, publishes with `--provenance` over
+OIDC (no npm token in secrets), and opens a GitHub Release from the matching changelog section. GLM
+needs `--timeout 300000` when re-probing before a release; the default 60s is not enough for it.
+
 Tests run TypeScript through `--experimental-strip-types`, so `.ts` extensions in imports are
 mandatory (`allowImportingTsExtensions` + `verbatimModuleSyntax` are on). `tsconfig.json` sets
 `strict` and `noUncheckedIndexedAccess`.

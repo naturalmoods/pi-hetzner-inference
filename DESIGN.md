@@ -214,9 +214,10 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
    `--timeout 300000`.
 3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
-4. **Releasing without a CI path** — 0.1.0 was published by hand (`npm publish` with an OTP, tagged
-   `v0.1.0`). That works, but the account now has `auth-and-writes` 2FA, so every release needs a code
-   typed at a TTY, and `--provenance` — which binds the tarball to the commit it was built from — is
-   only meaningful from CI. A release workflow using a granular token with bypass-2FA would give both,
-   and would also be the natural place to run the probe-baseline diff from question 1. Not worth it
-   until there is a second release to make.
+4. **Trusted publishing is not switched on yet** — `.github/workflows/release.yml` publishes on a `v*`
+   tag and authenticates over OIDC rather than with a stored npm token, which also produces the
+   provenance attestation. The npm side is a one-time manual step that has not been done: npmjs.com →
+   the package → Settings → Trusted publisher → this repo and `release.yml`. Until then the workflow's
+   publish step fails on auth and uploads nothing, which is the safe direction to fail in. 0.1.0 itself
+   was published by hand with an OTP, so it carries no provenance; 0.1.1 will be the first release to
+   have one.

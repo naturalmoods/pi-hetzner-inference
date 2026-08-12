@@ -1,0 +1,81 @@
+# Publishes to npm when a v* tag is pushed.
+#
+# Authentication is OIDC ("trusted publishing"), so there is no npm token in this
+# repository's secrets: npm verifies the workflow identity instead. That has to be
+# configured once, on npmjs.com → the package → Settings → Trusted publisher, with
+# this repository and this file's name (release.yml). Until it is, the publish step
+# fails with an auth error and nothing is uploaded.
+#
+# The same OIDC identity produces the provenance attestation, which links the
+# published tarball to the commit and workflow run it was built from — the reason
+# to publish from CI at all rather than from a laptop.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Lets a failed release be retried without moving the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, e.g. v0.1.1"
+        required: true
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # OIDC: trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Trusted publishing needs npm 11.5.1 or newer; the bundled version varies
+      # with the Node image, so pin the behaviour rather than inherit it.
+      - run: npm install -g npm@latest
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      # A tag that disagrees with package.json would publish a version nobody can
+      # find from the repository. Cheaper to fail here than to burn a version
+      # number, since npm never lets one be reused.
+      - name: Check the tag against package.json
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          tagged="${TAG#v}"
+          declared="$(node -p 'require("./package.json").version')"
+          if [ "$tagged" != "$declared" ]; then
+            echo "tag says $tagged, package.json says $declared" >&2
+            exit 1
+          fi
+          echo "releasing $declared"
+
+      - run: npm publish --provenance --access public
+
+      - name: Create the GitHub Release from the changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          notes="$(awk -v version="${TAG#v}" '
+            $0 ~ "^## " version { inside = 1; next }
+            /^## / { inside = 0 }
+            inside
+          ' CHANGELOG.md)"
+          if [ -z "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+            notes="See CHANGELOG.md."
+          fi
+          gh release create "$TAG" --title "$TAG" --notes "$notes" --verify-tag
