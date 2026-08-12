@@ -179,6 +179,11 @@ with another provider produces no noise. `/hetzner quiet` persists the opt-out.
 - `pi -e ./src/index.ts --list-models` — verified: four models registered with a token present,
   hidden and error-free without one
 - `npm run probe` — live capability matrix, see below
+- `.github/workflows/ci.yml` — typecheck and tests on Node 22 and 24 for every push and pull request
+- `.github/workflows/release.yml` — proven with 0.1.1: publishes on a `v*` tag over OIDC, so no npm
+  token is stored here, and the same exchange produces the provenance attestation (`npm audit
+  signatures` on an installed 0.1.1 reports a verified attestation). 0.1.0 was published by hand and
+  has none. A release is a tag push; the workflow refuses a tag that disagrees with `package.json`
 
 ## Resolved by the probe
 
@@ -214,11 +219,7 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
    `--timeout 300000`.
 3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
-4. **The release path has never been run** — `.github/workflows/release.yml` publishes on a `v*` tag and
-   authenticates over OIDC rather than with a stored npm token, which also produces the provenance
-   attestation. The npm-side trusted publisher was configured on 2026-08-12 (this repo, `release.yml`),
-   but nothing has exercised it: the workflow's logic was checked locally — YAML, changelog extraction,
-   and the tag/`package.json` guard in both directions — while the publish step itself is unverified,
-   and OIDC misconfiguration surfaces only as an auth failure at that step. 0.1.0 was published by hand
-   with an OTP and carries no provenance, so the first tagged release both proves the path and produces
-   the first attested tarball.
+4. **0.1.0 has no provenance** — it was published by hand before the release workflow existed, so it is
+   the one version whose tarball cannot be tied back to a commit. Nothing to fix: republishing under the
+   same version is impossible by design, and 0.1.1 supersedes it. Worth knowing only if someone audits
+   the older release and finds the attestation missing.
