@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 — 2026-08-12
 
 - Declare `engines.node: ">=22.6"`. That is where Node's type stripping landed, which is what lets pi
   load this package's TypeScript sources directly; below it the failure was silent
+- First release published from CI, so this is the first tarball with a provenance attestation linking
+  it to the commit and workflow run it was built from
 
 ## 0.1.0 — 2026-08-12
 
