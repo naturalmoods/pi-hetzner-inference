@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+All repository artifacts and collaboration text must be English, including code, comments, documentation,
+commits, branches, issues, pull requests, reviews, and release notes.
+
 ## What this is
 
 A **pi extension** (npm package `pi-hetzner-inference`) that registers the Hetzner Experiments
@@ -96,9 +99,9 @@ rate-limit headers, overflow error phrasing). The load-bearing findings, all mea
 - `MIN_MAX_TOKENS = 2048` — Qwen and GLM bill output tokens that never appear in the response (a
   one-word answer cost 232 / 101 tokens with `finish_reason: "stop"` and no `reasoning_content`). A
   small budget produced empty replies.
-- `reasoning: false`, `supportsUsageInStreaming: true`, image input only on Qwen and Kimi. Remaining
-  OpenAI-platform flags stay `false` because they were not exercised and `false` is the known-good
-  path.
+- `reasoning: true` with a measured per-model thinking switch, `supportsUsageInStreaming: true`,
+  image input only on Qwen and Kimi. Remaining OpenAI-platform flags stay `false` because they were
+  not exercised and `false` is the known-good path.
 
 If you change a compat flag or a context window, re-run the probe and update the tables in both
 `README.md` ("Measured behaviour") and `DESIGN.md` ("Compat flags") — they are the record of *why*
@@ -130,10 +133,12 @@ headers, those are authoritative and shown in `/hetzner status`.
 
 ### Failure posture
 
-Discovery, cache reads/writes and config reads all swallow their errors and degrade rather than
-throw: a malformed config, an unwritable cache dir or an unreachable API must never break startup or
-a turn. `src/config.ts` writes `~/.pi/agent/hetzner-inference.json` (mode `0600`) and it is the only
-file this extension writes — **tokens never go there**, they live in pi's credential store.
+Discovery, cache reads/writes and config reads swallow ordinary errors and degrade rather than
+throw; caller cancellation is the exception and must propagate without replacing last-known state.
+A malformed config, an unwritable cache dir or an unreachable API must never break startup or a turn.
+The extension writes settings to `~/.pi/agent/hetzner-inference.json` and discovered model ids to
+`~/.pi/agent/cache/hetzner-inference-models.json`, both mode `0600`. **Tokens never go there**; they
+live in pi's credential store.
 
 ## Testing
 
@@ -147,6 +152,4 @@ Anything needing the network belongs in `scripts/probe.mjs`, not in the test sui
 - `README.md` — user-facing: install, commands, model table, settings, measured behaviour
 - `DESIGN.md` — rationale, the "why an extension rather than `models.json`" comparison, and **Open
   questions** (withheld output tokens, GLM latency variance, cache pricing, publishing metadata)
-- `CHANGELOG.md` — 0.1.0 is still unreleased
-
-`package.json` has no `repository`/`homepage` yet; they must be set before `npm publish`.
+- `CHANGELOG.md` — released versions and upcoming changes

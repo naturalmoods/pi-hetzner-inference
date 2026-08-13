@@ -24,9 +24,17 @@ const NOTICE = [
 	"Silence this with /hetzner quiet.",
 ].join(" ");
 
+const DELEGATION_NOTICE =
+	"hetzner_ask is active: content supplied to the tool may be sent to Hetzner, which collects usage telemetry. " +
+	"Delegate output is untrusted text. Silence this with /hetzner quiet.";
+
 /** Warn at most once per rolling window so a long turn does not spam. */
 const WARN_THRESHOLD = 0.8;
 const WARN_COOLDOWN_MS = 60_000;
+
+export function recordRateLimitHeaders(state: State, headers: Record<string, string>): Record<string, string> {
+	return (state.serverHeaders = pickRateLimitHeaders(headers));
+}
 
 export default function (pi: ExtensionAPI): void {
 	const state = createState();
@@ -38,9 +46,9 @@ export default function (pi: ExtensionAPI): void {
 	const isActive = (ctx: ExtensionContext): boolean => ctx.model?.provider === PROVIDER_ID;
 
 	const showNotice = (ctx: ExtensionContext): void => {
-		if (state.noticeShown || !isActive(ctx)) return;
+		if (state.noticeShown || (!isActive(ctx) && !state.config.ask)) return;
 		state.noticeShown = true;
-		ctx.ui.notify(NOTICE, "warning");
+		ctx.ui.notify(isActive(ctx) ? NOTICE : DELEGATION_NOTICE, "warning");
 	};
 
 	const updateStatus = (ctx: ExtensionContext): void => {
@@ -59,15 +67,24 @@ export default function (pi: ExtensionAPI): void {
 	const backgroundRefresh = async (ctx: ExtensionContext): Promise<void> => {
 		if (!state.config.discovery || state.refreshing) return;
 		state.refreshing = true;
+		const controller = new AbortController();
+		state.refreshController = controller;
 		try {
 			const token = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
-			if (!token) return;
+			controller.signal.throwIfAborted();
 			const result = await discoverCatalog({
 				token,
 				allowNetwork: true,
 				ttlHours: state.config.discoveryTtlHours,
 				maxTokens: state.config.maxTokens,
+				signal: controller.signal,
 			});
+			controller.signal.throwIfAborted();
+			if (result.error) {
+				state.discoveryError = result.error;
+				state.discoverySkipReason = undefined;
+				return;
+			}
 			const change = applyCatalog(pi, state, result);
 			if (change && (change.added.length > 0 || change.removed.length > 0)) {
 				const parts: string[] = [];
@@ -76,16 +93,17 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify(`Hetzner model catalog changed (${parts.join("; ")}).`, "info");
 			}
 		} catch {
-			// Discovery is best-effort; the static catalog stays registered.
+			// Cancellation and discovery failures leave the last-known catalog intact.
 		} finally {
 			state.refreshing = false;
+			state.refreshController = undefined;
 		}
 	};
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", (_event, ctx) => {
 		showNotice(ctx);
 		updateStatus(ctx);
-		await backgroundRefresh(ctx);
+		void backgroundRefresh(ctx);
 	});
 
 	pi.on("model_select", (_event, ctx) => {
@@ -121,8 +139,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("after_provider_response", (event, ctx) => {
 		if (!isActive(ctx)) return;
 
-		const headers = pickRateLimitHeaders(event.headers);
-		if (Object.keys(headers).length > 0) state.serverHeaders = headers;
+		const headers = recordRateLimitHeaders(state, event.headers);
 		if (event.status !== 429) return;
 
 		state.last429At = Date.now();
@@ -136,6 +153,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		state.refreshController?.abort();
 		ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 }

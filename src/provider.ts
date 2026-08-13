@@ -28,13 +28,23 @@ function providerConfig(state: State, models: ProviderModelConfig[]): ProviderCo
 		refreshModels: async (context: RefreshContext) => {
 			const result = await discoverCatalog({
 				token: tokenFromContext(context),
-				allowNetwork: context.allowNetwork && state.config.discovery,
+				allowNetwork: context.allowNetwork,
+				discovery: state.config.discovery,
 				force: context.force,
 				ttlHours: state.config.discoveryTtlHours,
 				maxTokens: state.config.maxTokens,
 				signal: context.signal,
 			});
-			recordCatalog(state, result);
+			if (result.error) {
+				state.discoveryError = result.error;
+				state.discoverySkipReason = undefined;
+				throw new Error(result.error);
+			}
+			// Keep extension state behind the same generation/abort guard pi uses for
+			// the returned registry update. The legacy composer publishes the models
+			// immediately after this callback returns.
+			const published = await context.publish({ update: () => recordCatalog(state, result) });
+			if (!published) context.signal.throwIfAborted();
 			return result.models;
 		},
 	};
@@ -47,6 +57,7 @@ export function recordCatalog(state: State, result: DiscoveryResult): void {
 	state.source = result.source;
 	state.checkedAt = result.checkedAt;
 	state.discoveryError = result.error;
+	state.discoverySkipReason = result.skipReason;
 }
 
 export function registerProvider(pi: ExtensionAPI, state: State): void {
@@ -66,12 +77,14 @@ export interface CatalogChange {
  * when nothing changed.
  */
 export function applyCatalog(pi: ExtensionAPI, state: State, result: DiscoveryResult): CatalogChange | undefined {
-	const before = new Set(state.models.map((model) => model.id));
+	const beforeModels = state.models;
+	const before = new Set(beforeModels.map((model) => model.id));
 	recordCatalog(state, result);
 	const after = new Set(state.models.map((model) => model.id));
 
 	const added = [...after].filter((id) => !before.has(id));
 	const removed = [...before].filter((id) => !after.has(id));
+	if (JSON.stringify(beforeModels) === JSON.stringify(state.models)) return undefined;
 	pi.registerProvider(PROVIDER_ID, providerConfig(state, state.models));
-	return added.length > 0 || removed.length > 0 ? { added, removed } : undefined;
+	return { added, removed };
 }

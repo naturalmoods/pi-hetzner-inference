@@ -45,7 +45,8 @@ async function statusReport(state: State, ctx: ExtensionCommandContext): Promise
 			` · ${usage.samples} response(s)${usage.resetInMs > 0 ? `, oldest expires in ${Math.ceil(usage.resetInMs / 1000)}s` : ""}`,
 	];
 
-	if (state.discoveryError) lines.push(`  discovery    ${state.discoveryError}`);
+	if (state.discoveryError) lines.push(`  discovery    failed: ${state.discoveryError}`);
+	else if (state.discoverySkipReason) lines.push(`  discovery    ${state.discoverySkipReason}`);
 	if (state.last429At) {
 		const wait = state.lastRetryAfterSeconds;
 		lines.push(`  last 429     ${formatAgo(state.last429At, now)}${wait ? `, Retry-After ${wait}s` : ""}`);
@@ -98,8 +99,12 @@ async function refresh(state: State, pi: ExtensionAPI, ctx: ExtensionCommandCont
 		ttlHours: state.config.discoveryTtlHours,
 		maxTokens: state.config.maxTokens,
 	});
+	if (result.error) {
+		state.discoveryError = result.error;
+		state.discoverySkipReason = undefined;
+		return `Refresh failed (${result.error}); keeping ${state.models.length} model(s) from ${state.source}.`;
+	}
 	const change = applyCatalog(pi, state, result);
-	if (result.error) return `Refresh failed (${result.error}); keeping ${state.models.length} model(s) from ${state.source}.`;
 
 	const parts = [`Catalog refreshed: ${state.models.length} model(s).`];
 	if (change?.added.length) parts.push(`New: ${change.added.join(", ")}.`);

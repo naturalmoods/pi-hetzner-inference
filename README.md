@@ -113,10 +113,12 @@ available. If that changes, those headers are authoritative and `/hetzner status
 /reload
 ```
 
-Registers one tool. The main model can hand it self-contained text work — summarising a long log
-or diff, translating, extracting fields — and it answers from a free Hetzner model. The delegate
-gets no tools, no repository access and no conversation history, so everything it needs must be
-in the call.
+Registers one sequential tool. The main model can hand it self-contained text work — summarising
+a long log or diff, translating, extracting fields — and it answers from a registered Hetzner model.
+The delegate gets no tools, no repository access and no conversation history, so everything it needs
+must be in the call. `task` is limited to 4,000 characters, `input` to 1,000,000 characters, and an
+optional model id to 200 characters. Input is marked as untrusted data, and returned text is marked as
+untrusted rather than authority for consequential tool actions.
 
 Thinking is switched off for the delegate. This work is mechanical, and reasoning is billed against
 the same per-key output budget the main model is spending — so paying for a reasoning block that is
@@ -129,7 +131,8 @@ the main model is already a Hetzner one.
 ## Settings
 
 Environment variables win over `~/.pi/agent/hetzner-inference.json`, which wins over the defaults.
-The config file is the only thing this extension writes — tokens live in pi's credential store.
+The extension writes that settings file and the model-id cache described below, both with mode `0600`.
+API tokens live only in pi's credential store.
 
 | Setting | Env | Default | Meaning |
 | --- | --- | --- | --- |
@@ -142,10 +145,12 @@ The config file is the only thing this extension writes — tokens live in pi's 
 | `maxTokens` | `PI_HETZNER_MAX_TOKENS` | `32768` | Output cap advertised for every model |
 
 Discovery caches only the reported model ids, in `~/.pi/agent/cache/hetzner-inference-models.json`.
+Responses are limited to 1 MB and 1,000 models; ids are limited to 200 printable URL-safe characters.
 Metadata always comes from the current package version, so upgrading takes effect immediately
-instead of being shadowed by a stale cache. Startup performs no network I/O: the cached (or static)
-catalog is registered synchronously, and a refresh happens in the background only when the cache
-is stale.
+instead of being shadowed by a stale cache. With discovery disabled, the cache is ignored. Startup
+performs no network I/O: the static catalog is registered synchronously, and an opportunistic refresh
+runs without blocking session startup. Expected skips (disabled, offline, no token, or a fresh cache)
+are reported separately from transport, authentication, and response-shape failures.
 
 ## Measured behaviour
 
