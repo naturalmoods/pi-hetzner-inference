@@ -9,8 +9,9 @@ Use the [Hetzner Experiments Platform Inference API](https://inference.hetzner.c
 - Optional `hetzner_ask` tool: hand bulk text work to a free model while an expensive model stays in the driver's seat
 
 > **The service is an experiment, not a product.** No SLA, no guaranteed availability, and it
-> can be changed or withdrawn at any time. Hetzner states it does not store request or response
-> content, but usage telemetry is collected. Do not put production-critical work on it.
+> can be changed or withdrawn at any time. Hetzner's [Experiments Platform documentation](https://docs.hetzner.com/general/company-and-policy/experiments/experiments-platform/)
+> says metrics are collected to evaluate experiments; its public Inference documentation does not
+> specify prompt, completion, or image retention. Do not send sensitive or production-critical data.
 
 ## Install
 
@@ -84,7 +85,8 @@ and re-check any model with `node scripts/probe.mjs --model <id> --timeout 30000
 
 `/v1/models` returns ids only, so the metadata above lives in `src/catalog.ts` and is overlaid
 onto whatever the endpoint reports. An id this package does not recognise is still registered,
-with conservative defaults (128k context, text only) and a note in `/hetzner models`.
+with conservative defaults (128k total budget, text only, with output room reserved) and a note in
+`/hetzner models`.
 
 ## Rate limits
 
@@ -159,8 +161,9 @@ function calling, streaming usage or base64 image input — all of which decide 
 agent can use the service at all. `scripts/probe.mjs` measures them:
 
 ```bash
-HETZNER_INFERENCE_API_KEY=<token> npm run probe
-npm run probe -- --overflow          # also verifies pi's auto-compaction path (~2MB per model)
+export HETZNER_INFERENCE_API_KEY=<token>
+npm run probe -- --strict --timeout 300000 --json .probe-report.json
+npm run probe -- --strict --overflow --timeout 300000  # also requires pi's auto-compaction path (~2MB per model)
 ```
 
 Results from 2026-08-11:
@@ -182,7 +185,10 @@ Results from 2026-08-11:
 
 GLM-5.2-NVFP4 needs a longer deadline than the probe's default to be measured at all
 (`npm run probe -- --model GLM-5.2-NVFP4 --timeout 300000`); it answered a one-word prompt in 29.8s on
-the run that produced its rows above.
+the run that produced its rows above. `--strict` is the maintainer release gate: it requires every
+known model and every load-bearing capability to pass. Overflow is reported as skipped unless
+`--overflow` is requested, while timeouts and incomplete observations are inconclusive and still
+make a strict run exit nonzero. JSON reports include the measurement time and per-check verdicts.
 
 Three consequences worth knowing:
 
@@ -244,10 +250,10 @@ If all you want is the four models, `~/.pi/agent/models.json` is enough:
       "apiKey": "$HETZNER_INFERENCE_API_KEY",
       "compat": { "supportsDeveloperRole": false, "maxTokensField": "max_tokens" },
       "models": [
-        { "id": "Kimi-K2.7-Code", "contextWindow": 262144, "input": ["text", "image"] },
-        { "id": "GLM-5.2-NVFP4", "contextWindow": 512000 },
-        { "id": "DeepSeek-V4-Flash-0731", "contextWindow": 512000 },
-        { "id": "Qwen/Qwen3.6-35B-A3B-FP8", "contextWindow": 262144, "input": ["text", "image"] }
+        { "id": "Kimi-K2.7-Code", "contextWindow": 229376, "maxTokens": 32768, "input": ["text", "image"] },
+        { "id": "GLM-5.2-NVFP4", "contextWindow": 479232, "maxTokens": 32768 },
+        { "id": "DeepSeek-V4-Flash-0731", "contextWindow": 479232, "maxTokens": 32768 },
+        { "id": "Qwen/Qwen3.6-35B-A3B-FP8", "contextWindow": 229376, "maxTokens": 32768, "input": ["text", "image"] }
       ]
     }
   }
@@ -263,7 +269,8 @@ fits; do not use both for the same provider id.
 npm install
 npm run typecheck
 npm test                       # node:test, no network
-pi -e ./src/index.ts           # load without installing
+PI_OFFLINE=1 PI_HETZNER_DISCOVERY=false pi -e ./src/index.ts --list-models
+npm run probe -- --strict --timeout 300000  # live release gate; requires HETZNER_INFERENCE_API_KEY
 ```
 
 The extension has no runtime dependencies. All pi imports are type-only, and `typebox` is

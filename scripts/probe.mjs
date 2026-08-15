@@ -9,13 +9,15 @@
  *
  * Usage:
  *   HETZNER_INFERENCE_API_KEY=... node scripts/probe.mjs
- *   node scripts/probe.mjs --token <token> --model Kimi-K2.7-Code --json report.json
+ *   HETZNER_INFERENCE_API_KEY=... node scripts/probe.mjs --strict --timeout 300000 --json report.json
  *   node scripts/probe.mjs --overflow            # adds a ~2MB request per model
  *   node scripts/probe.mjs --model GLM-5.2-NVFP4 --timeout 300000
  *
  * It sends a handful of tiny requests per model. Nothing is written anywhere
  * unless --json is passed.
  */
+
+import { evaluateProbe } from "./probe-verdict.mjs";
 
 const args = process.argv.slice(2);
 
@@ -25,21 +27,27 @@ function flag(name, fallback) {
 }
 
 const BASE_URL = flag("base-url", process.env.HETZNER_INFERENCE_BASE_URL ?? "https://inference.hetzner.com/api/v1");
-const TOKEN = flag("token", process.env.HETZNER_INFERENCE_API_KEY ?? "");
+const TOKEN = process.env.HETZNER_INFERENCE_API_KEY ?? "";
 const TIMEOUT_MS = Number(flag("timeout", "60000"));
 const JSON_OUT = flag("json", "");
 const ONLY_MODELS = args.filter((arg, index) => args[index - 1] === "--model");
+const STRICT = args.includes("--strict");
+const OVERFLOW = args.includes("--overflow");
 
 /** 1x1 transparent PNG, enough to see whether data: URIs are accepted. */
 const TINY_PNG =
 	"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
 
+if (args.includes("--token")) {
+	console.error("--token is not supported. Set HETZNER_INFERENCE_API_KEY without putting credentials in command arguments.");
+	process.exit(2);
+}
 if (!TOKEN) {
-	console.error("No token. Set HETZNER_INFERENCE_API_KEY or pass --token <token>.");
+	console.error("No token. Set HETZNER_INFERENCE_API_KEY.");
 	process.exit(2);
 }
 
-const report = { baseUrl: BASE_URL, models: {}, notes: [] };
+const report = { measuredAt: new Date().toISOString(), baseUrl: BASE_URL, models: {}, notes: [] };
 
 async function call(path, body, { stream = false } = {}) {
 	const started = Date.now();
@@ -107,7 +115,10 @@ function mark(value) {
 async function probeModels() {
 	const result = await call("/models");
 	if (!result.ok) {
-		console.error(`GET /models failed: HTTP ${result.status} ${short(result.text)}`);
+		const error = `GET /models failed: HTTP ${result.status} ${short(result.text)}`;
+		console.error(error);
+		report.modelsEndpoint = { ok: false, status: result.status, timedOut: result.timedOut, error };
+		if (STRICT) return ONLY_MODELS;
 		process.exit(1);
 	}
 	const ids = (result.json?.data ?? []).map((entry) => entry.id).filter(Boolean);
@@ -262,6 +273,7 @@ async function probeTools(model, silencer) {
 		return {
 			ok: result.ok,
 			status: result.status,
+			timedOut: result.timedOut,
 			error: result.ok ? undefined : short(result.text, 300),
 			called: Array.isArray(calls) && calls.length > 0,
 			name: calls?.[0]?.function?.name,
@@ -289,6 +301,7 @@ async function probeTools(model, silencer) {
 	return {
 		accepted: plain.ok,
 		status: plain.status,
+		timedOut: plain.timedOut,
 		error: plain.error,
 		calledTool: plain.called,
 		callName: plain.name,
@@ -297,6 +310,7 @@ async function probeTools(model, silencer) {
 		outputTokens: plain.outputTokens,
 		thinkingOff: withThinkingOff,
 		toolChoiceAccepted: forced ? forced.ok : undefined,
+		toolChoiceTimedOut: forced?.timedOut,
 		toolChoiceError: forced && !forced.ok ? short(forced.text, 200) : undefined,
 		toolChoiceCalled: forced?.json?.choices?.[0]?.message?.tool_calls?.length > 0,
 		toolChoiceFinishReason: forced?.json?.choices?.[0]?.finish_reason,
@@ -328,6 +342,7 @@ async function probeToolResultRoundTrip(model) {
 	return {
 		ok: result.ok,
 		status: result.status,
+		timedOut: result.timedOut,
 		error: result.ok ? undefined : short(result.text, 300),
 		reply: short(result.json?.choices?.[0]?.message?.content, 80),
 	};
@@ -350,6 +365,7 @@ async function probeStreaming(model, includeUsage) {
 	return {
 		ok: result.ok,
 		status: result.status,
+		timedOut: result.timedOut,
 		error: result.ok ? undefined : short(result.text, 200),
 		chunks: chunks.length,
 		usageInStream: Boolean(usageChunk),
@@ -373,6 +389,7 @@ async function probeImage(model) {
 	return {
 		ok: result.ok,
 		status: result.status,
+		timedOut: result.timedOut,
 		error: result.ok ? undefined : short(result.text, 200),
 		reply: short(result.json?.choices?.[0]?.message?.content, 40),
 	};
@@ -386,7 +403,7 @@ async function probeMaxTokensCeiling(model) {
 		max_tokens: 100_000_000,
 		messages: [{ role: "user", content: "hi" }],
 	});
-	return { ok: result.ok, status: result.status, message: short(result.text, 300) };
+	return { ok: result.ok, status: result.status, timedOut: result.timedOut, message: short(result.text, 300) };
 }
 
 async function probeContextOverflow(model) {
@@ -425,6 +442,8 @@ async function probeVisibleOutput(model) {
 	const content = message?.content ?? "";
 	return {
 		ok: result.ok,
+		status: result.status,
+		timedOut: result.timedOut,
 		error: result.ok ? undefined : short(result.text, 200),
 		finishReason: result.json?.choices?.[0]?.finish_reason,
 		contentLength: content.length,
@@ -490,6 +509,8 @@ async function probeThinkingToggle(model) {
 		const field = reasoningFieldOf(message);
 		attempts.push({
 			label: variant.label,
+			status: result.status,
+			timedOut: result.timedOut,
 			// Kept so a later probe can re-run under the configuration pi will
 			// actually use once this switch is wired into `compat`.
 			body: variant.body,
@@ -619,7 +640,7 @@ for (const model of models) {
 	entry.maxTokensCeiling = await probeMaxTokensCeiling(model);
 	console.log(`  max_tokens ceiling       HTTP ${entry.maxTokensCeiling.status} — ${entry.maxTokensCeiling.message}`);
 
-	if (args.includes("--overflow")) {
+	if (OVERFLOW) {
 		entry.contextOverflow = await probeContextOverflow(model);
 		if (entry.contextOverflow.timedOut) {
 			console.log(`  context overflow         inconclusive — the oversized request timed out, not the API's fault`);
@@ -677,8 +698,15 @@ if (unreachable.length > 0) {
 	);
 }
 
+report.verdict = evaluateProbe(report, { overflowRequested: OVERFLOW });
+console.log(`\n${STRICT ? "Strict" : "Capability"} verdict: ${report.verdict.status.toUpperCase()} (${report.verdict.failures} failed, ${report.verdict.inconclusive} inconclusive)`);
+for (const check of report.verdict.checks.filter((item) => item.status === "fail" || item.status === "inconclusive")) {
+	console.log(`  ${check.status.toUpperCase().padEnd(12)} ${check.model}: ${check.check}${check.detail ? ` — ${check.detail}` : ""}`);
+}
+
 if (JSON_OUT) {
 	const { writeFileSync } = await import("node:fs");
 	writeFileSync(JSON_OUT, `${JSON.stringify(report, null, 2)}\n`);
 	console.log(`\nJSON report written to ${JSON_OUT}`);
 }
+if (STRICT && report.verdict.status !== "pass") process.exitCode = 1;

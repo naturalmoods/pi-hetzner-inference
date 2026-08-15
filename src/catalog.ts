@@ -30,8 +30,8 @@ const FREE: ProviderModelConfig["cost"] = { input: 0, output: 0, cacheRead: 0, c
  * Compat flags for this deployment.
  *
  * Measured with `scripts/probe.mjs` on 2026-08-11 (see README):
- * - Function calling works on Kimi and DeepSeek: `tools`, forced `tool_choice`,
- *   and tool-result replay all behave, so they can drive pi's agent loop.
+ * - Function calling works on all four models: `tools`, forced `tool_choice`,
+ *   and tool-result replay all behave, so every documented model can drive pi's agent loop.
  * - Streaming returns usage, hence `supportsUsageInStreaming`.
  * - Thinking arrives on a separate channel — see `ModelSpec.reasoning` below.
  *

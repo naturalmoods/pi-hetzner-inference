@@ -27,7 +27,7 @@ extension earns its place on the parts that cannot be expressed statically:
 | Rate-limit budget visible before a turn stalls | no | yes |
 | Actionable 429 message instead of a raw provider error | no | yes |
 | `/hetzner status` reachability and auth diagnostics | no | yes |
-| One-time experiment/telemetry notice | no | yes |
+| One-time experiment/metrics-and-retention notice | no | yes |
 | Free model as delegated bulk worker (`hetzner_ask`) | no | yes |
 | Versioned distribution via `pi install` | no | yes |
 
@@ -55,7 +55,7 @@ Reading pi 0.83's actual implementation removed roughly half of the first draft:
 
 ```
 src/index.ts      extension factory: registration + event wiring
-src/provider.ts   provider config, refreshModels, immediate re-registration
+src/provider.ts   provider config and transactional refreshModels publication
 src/catalog.ts    static model table, compat flags, id → metadata merge
 src/discovery.ts  GET /v1/models, id-only cache with TTL
 src/budget.ts     60s sliding window, status formatting, rate-limit headers
@@ -63,7 +63,7 @@ src/commands.ts   /hetzner status|models|refresh|quiet|ask
 src/delegate.ts   hetzner_ask tool (opt-in)
 src/config.ts     env > config file > defaults
 src/state.ts      per-process state
-scripts/probe.mjs capability probe against the live API
+scripts/probe.mjs live capability probe and strict release gate
 ```
 
 No runtime dependencies: pi imports are type-only, `typebox` comes from pi. That keeps
@@ -71,10 +71,11 @@ No runtime dependencies: pi imports are type-only, `typebox` comes from pi. That
 
 ### Startup cost is zero
 
-The factory is synchronous and registers the cached-or-static catalog. Discovery happens later:
-`refreshModels` when pi refreshes catalogs (`pi update models`), plus one opportunistic background
-refresh on `session_start` that short-circuits on a fresh cache. Re-registration after the load
-phase applies immediately, so a changed catalog needs no `/reload`.
+The factory is synchronous and registers the static catalog without network I/O. Discovery happens
+later: `refreshModels` when pi refreshes catalogs (`pi update models`), plus one opportunistic
+background refresh on `session_start` that short-circuits on a fresh cache. A changed catalog is
+published without blocking session startup and needs no `/reload`; shutdown and superseded refreshes
+cannot replace the last-known-good catalog.
 
 ### The catalog is two sources joined
 
@@ -84,7 +85,8 @@ phase applies immediately, so a changed catalog needs no `/reload`.
 - reported id ∩ known table → table metadata under the reported id (which may carry an org prefix)
 - reported id ∉ table → registered with conservative defaults, flagged in `/hetzner models`
 - known id ∉ report → retired, not registered
-- empty or failed report → static table, so the provider is never left with zero models
+- empty successful report → static table, so the provider is never left with zero models
+- failed, cancelled, or superseded refresh → retain the current last-known-good catalog
 
 The cache stores **only ids**. Metadata always comes from the installed package version, so
 upgrading fixes a wrong context window immediately instead of waiting for a cache expiry.
@@ -142,7 +144,13 @@ changes within a day is the strongest argument for tying every compat decision t
 for re-running the probe rather than trusting a table written last week.
 
 The probe also pinned the context windows from the server's own error text
-(`max_model_len=max_total_tokens=512000` / `262144`), confirming the documented numbers.
+(`max_model_len=max_total_tokens=512000` / `262144`), confirming the documented numbers. Its
+maintainer-run `--strict` mode now turns those observations into an explicit release gate: every
+known model must pass tools, forced tool choice, tool replay, streaming usage, measured image
+modality, thinking control, `max_tokens`, and context-ceiling checks. Timeouts and incomplete results
+are inconclusive and fail the gate; overflow is explicitly skipped unless `--overflow` requests it.
+The JSON report carries the measurement timestamp and every check's verdict. This stays outside CI
+because it needs a live credential and consumes the same per-key rate budget as users.
 
 ### The advertised context window reserves output room
 
@@ -165,25 +173,29 @@ authoritative and shown in `/hetzner status`.
 
 ### Notice policy
 
-The experiment/telemetry warning appears once per process, and only when a Hetzner model is
-actually the active model (`session_start` or `model_select`). Installing the package while working
-with another provider produces no noise. `/hetzner quiet` persists the opt-out.
+The experiment/metrics warning appears once per process, and only when a Hetzner model is actually
+the active model (`session_start` or `model_select`). Installing the package while working with
+another provider produces no noise. `/hetzner quiet` persists the opt-out. Hetzner's public
+[Experiments Platform documentation](https://docs.hetzner.com/general/company-and-policy/experiments/experiments-platform/)
+describes metric collection but does not specify prompt, completion, or image retention, so the
+notice does not claim that request or response content is never stored.
 
 ## Testing
 
-- `npm test` — `node:test`, no network: catalog merge (prefixed ids, unknown ids, retirement,
-  dedup, ordering), the per-model thinking switches — including that every documented model has a
-  measured one and that the merge does not drop the shared flags — and the rate window (expiry
-  boundaries, worst-limit fraction, formatting, header parsing) with an injected clock
+- `npm test` — `node:test`, no network: catalog/config/discovery boundaries, delegation limits,
+  provider and event wiring, the per-model thinking switches, strict-probe verdict calculation, and
+  the rate window with an injected clock
 - `npm run typecheck` — `tsc --noEmit` against the real pi type definitions
 - `pi -e ./src/index.ts --list-models` — verified: four models registered with a token present,
   hidden and error-free without one
-- `npm run probe` — live capability matrix, see below
-- `.github/workflows/ci.yml` — typecheck and tests on Node 22 and 24 for every push and pull request
-- `.github/workflows/release.yml` — proven with 0.1.1: publishes on a `v*` tag over OIDC, so no npm
-  token is stored here, and the same exchange produces the provenance attestation (`npm audit
-  signatures` on an installed 0.1.1 reports a verified attestation). 0.1.0 was published by hand and
-  has none. A release is a tag push; the workflow refuses a tag that disagrees with `package.json`
+- `npm run probe -- --strict --timeout 300000` — live release gate, see below
+- `.github/workflows/ci.yml` — typecheck, tests, and a real pi host-load smoke check without network
+  or credentials on Node 22 and 24 for every push and pull request
+- `.github/workflows/release.yml` — validates the exact protected tag and default-branch ancestry,
+  checks both Node lines without elevated credentials, then gives OIDC only to the npm publish job
+  and repository write access only to GitHub Release creation. Actions and npm are immutable-pinned;
+  an existing package is accepted only when its SLSA provenance references the expected commit.
+  0.1.0 remains the sole hand-published release without provenance
 
 ## Resolved by the probe
 
@@ -205,27 +217,19 @@ patterns, so auto-compaction and retry work without a `message_end` normalizer.
 
 ## Open questions
 
-1. **Capability drift, and no way to notice it** — GLM-5.2-NVFP4 rejected `max_completion_tokens` on
-   one probe run and accepted it on a later one the same day. Every compat flag in `src/catalog.ts` is
-   a snapshot of a deployment that is explicitly labelled an experiment, and nothing in the package
-   detects when a snapshot goes stale: a flag that silently becomes wrong produces a broken model, not
-   a warning. Re-running `npm run probe` before each release is the current answer, which relies on
-   remembering to do it. A cheap improvement would be `npm run probe --json` output committed as a
-   baseline, with a diff against it in CI; the reason not to do it yet is that CI would need a live API
-   token, and the rate window is per key.
-2. **Latency variance** — GLM-5.2-NVFP4 took 2.3s, 29.8s, 45s and twice over 60s on the same one-word
+1. **Latency variance** — GLM-5.2-NVFP4 took 2.3s, 29.8s, 45s and twice over 60s on the same one-word
    prompt across five runs. Nothing to fix in the extension; noted in `/hetzner models` so a stalled
    turn is not mistaken for a bug. It is a weak choice for interactive work, and probing it needs
    `--timeout 300000`.
-3. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
+2. **Cache pricing** — `cacheRead`/`cacheWrite` are zero like everything else. If prompt caching
    ever appears, `cacheControlFormat` may become relevant.
-4. **`hetzner_ask` has never run with the thinking switch live** — the probe measured the request shape
+3. **`hetzner_ask` has never run with the thinking switch live** — the probe measured the request shape
    (sending the model's measured `chat_template_kwargs` key empties the `reasoning` field), and a unit
    test pins which key each model gets, but no delegated call has been made through the tool itself
    since. To check: `/hetzner ask on`, `/reload`, then a summarising call — the tool result carries
    `details.usage.output` and `details.thinking`, and the output count should be far lower than it was
    when the delegate was still paying for reasoning.
-5. **0.1.0 has no provenance** — it was published by hand before the release workflow existed, so it is
+4. **0.1.0 has no provenance** — it was published by hand before the release workflow existed, so it is
    the one version whose tarball cannot be tied back to a commit. Nothing to fix: republishing under the
    same version is impossible by design, and 0.1.1 supersedes it. Worth knowing only if someone audits
    the older release and finds the attestation missing.

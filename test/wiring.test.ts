@@ -17,11 +17,22 @@ test("session-start refresh is non-blocking and non-Hetzner delegation notice is
 	try {
 		const handlers = new Map<string, Function>();
 		const notices: string[] = [];
+		const providers: string[] = [];
+		const commands: string[] = [];
+		const tools: string[] = [];
 		const pi = {
-			registerProvider() {}, registerCommand() {}, registerTool() {},
+			registerProvider(name: string) { providers.push(name); },
+			registerCommand(name: string) { commands.push(name); },
+			registerTool(tool: { name: string }) { tools.push(tool.name); },
 			on(name: string, handler: Function) { handlers.set(name, handler); },
 		} as unknown as ExtensionAPI;
 		extension(pi);
+		assert.deepEqual(providers, ["hetzner"]);
+		assert.deepEqual(commands, ["hetzner"]);
+		assert.deepEqual(tools, ["hetzner_ask"]);
+		assert.deepEqual([...handlers.keys()], [
+			"session_start", "model_select", "turn_end", "after_provider_response", "session_shutdown",
+		]);
 		const ctx = {
 			model: { provider: "other" },
 			modelRegistry: { getApiKeyForProvider: () => new Promise<string>(() => {}) },
@@ -69,6 +80,41 @@ test("session shutdown prevents a pending background refresh from publishing", a
 	} finally {
 		if (previous === undefined) delete process.env.PI_HETZNER_DISCOVERY;
 		else process.env.PI_HETZNER_DISCOVERY = previous;
+	}
+});
+
+test("429 responses notify and session shutdown clears host status", () => {
+	const previous = {
+		discovery: process.env.PI_HETZNER_DISCOVERY,
+		quiet: process.env.PI_HETZNER_QUIET,
+	};
+	process.env.PI_HETZNER_DISCOVERY = "false";
+	process.env.PI_HETZNER_QUIET = "true";
+	try {
+		const handlers = new Map<string, Function>();
+		const notices: string[] = [];
+		const statuses: unknown[][] = [];
+		const pi = {
+			registerProvider() {}, registerCommand() {},
+			on(name: string, handler: Function) { handlers.set(name, handler); },
+		} as unknown as ExtensionAPI;
+		extension(pi);
+		const ctx = {
+			model: { provider: "hetzner" },
+			ui: {
+				notify(message: string) { notices.push(message); },
+				setStatus(...args: unknown[]) { statuses.push(args); },
+			},
+		};
+		handlers.get("after_provider_response")?.({ status: 429, headers: { "retry-after": "4" } }, ctx);
+		assert.match(notices[0]!, /retry after 4s/);
+		handlers.get("session_shutdown")?.({}, ctx);
+		assert.deepEqual(statuses.at(-1), ["hetzner-budget", undefined]);
+	} finally {
+		if (previous.discovery === undefined) delete process.env.PI_HETZNER_DISCOVERY;
+		else process.env.PI_HETZNER_DISCOVERY = previous.discovery;
+		if (previous.quiet === undefined) delete process.env.PI_HETZNER_QUIET;
+		else process.env.PI_HETZNER_QUIET = previous.quiet;
 	}
 });
 

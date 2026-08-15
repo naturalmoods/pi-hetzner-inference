@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Validate config, discovery responses, cache data, and delegated completions at their trust boundaries;
+  preserve last-known-good state across failures, cancellation, superseded refreshes, and shutdown
+- Bound `hetzner_ask` input/output and concurrency, restrict it to registered models, separate task
+  instructions from untrusted input, sanitize diagnostics, and label delegated output as untrusted
+- Add offline config, discovery, delegation, provider/event wiring, and strict-probe verdict tests,
+  plus a real no-token/no-network pi host-load smoke check on Node 22 and 24
+- Add a maintainer-run `probe --strict` release gate with timestamped per-capability JSON verdicts;
+  remove command-line token input
+- Validate exact release tags and default-branch ancestry before publishing, pin Actions and npm,
+  split OIDC and repository-write privileges into separate jobs, and verify provenance on reruns
+- Document both mode-`0600` state files, corrected static context budgets, public telemetry/retention
+  limits, private vulnerability reporting, and protected release ownership
+
 ## 0.1.1 — 2026-08-12
 
 - Declare `engines.node: ">=22.6"`. That is where Node's type stripping landed, which is what lets pi

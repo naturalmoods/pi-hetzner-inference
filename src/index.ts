@@ -19,14 +19,14 @@ const STATUS_KEY = "hetzner-budget";
 
 const NOTICE = [
 	"Hetzner Inference is an experiment, not a product: no SLA, no guaranteed availability,",
-	"and it can be changed or withdrawn at any time. Hetzner states it does not store request",
-	"or response content, but usage telemetry is collected. Avoid production-critical work.",
+	"and it can be changed or withdrawn at any time. Public documentation describes metric collection",
+	"but does not specify prompt, completion, or image retention. Avoid sensitive or production-critical data.",
 	"Silence this with /hetzner quiet.",
 ].join(" ");
 
 const DELEGATION_NOTICE =
-	"hetzner_ask is active: content supplied to the tool may be sent to Hetzner, which collects usage telemetry. " +
-	"Delegate output is untrusted text. Silence this with /hetzner quiet.";
+	"hetzner_ask is active: content supplied to the tool may be sent to Hetzner; public documentation does not " +
+	"specify content retention. Delegate output is untrusted text. Silence this with /hetzner quiet.";
 
 /** Warn at most once per rolling window so a long turn does not spam. */
 const WARN_THRESHOLD = 0.8;
