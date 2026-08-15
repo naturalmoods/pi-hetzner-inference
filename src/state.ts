@@ -14,8 +14,10 @@ export interface State {
 	ids: string[];
 	source: CatalogSource;
 	checkedAt?: number;
-	/** Why the last discovery attempt fell back, if it did. */
+	/** Why the last discovery attempt failed, if it did. */
 	discoveryError?: string;
+	/** Expected reason discovery did not contact the network. */
+	discoverySkipReason?: string;
 	/** Rolling 60s token usage observed in this session. */
 	window: RateWindow;
 	/** Rate-limit headers from the last Hetzner response, if the API sends any. */
@@ -26,10 +28,11 @@ export interface State {
 	noticeShown: boolean;
 	/** Guards against overlapping background refreshes. */
 	refreshing: boolean;
+	/** Cancels the current background request during shutdown. */
+	refreshController?: AbortController;
 }
 
-export function createState(): State {
-	const config = loadConfig();
+export function createState(config: HetznerConfig = loadConfig()): State {
 	return {
 		config,
 		models: staticCatalog(config),

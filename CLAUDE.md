@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+All repository artifacts and collaboration text must be English, including code, comments, documentation,
+commits, branches, issues, pull requests, reviews, and release notes.
+
 ## What this is
 
 A **pi extension** (npm package `pi-hetzner-inference`) that registers the Hetzner Experiments
@@ -22,9 +25,9 @@ node --experimental-strip-types --test --test-name-pattern "worstFraction" test/
 pi -e ./src/index.ts                           # load the extension without installing
 pi -e ./src/index.ts --list-models             # verify registration
 
-HETZNER_INFERENCE_API_KEY=<token> npm run probe # live capability matrix
-npm run probe -- --overflow                     # + a ~2MB request per model (verifies pi's compaction path)
-npm run probe -- --model GLM-5.2-NVFP4 --timeout 300000
+HETZNER_INFERENCE_API_KEY=<token> npm run probe -- --strict --timeout 300000 # live release gate
+npm run probe -- --strict --overflow --timeout 300000 # + ~2MB/model, requires compaction checks
+npm run probe -- --model GLM-5.2-NVFP4 --timeout 300000 # diagnostic subset, not a release gate
 ```
 
 `.github/workflows/ci.yml` runs typecheck and tests on Node 22 and 24 for every push and pull request
@@ -36,21 +39,23 @@ Releasing is a tag push, and never a manual `npm publish` — the account's 2FA 
 publishing by hand needs an OTP at a real terminal and produces a tarball with no provenance (0.1.0 is
 the one such version). The sequence:
 
-1. `npm run probe` with a token exported — a compat flag can go stale between releases, see **Open
-   questions** in `DESIGN.md`. GLM needs `--timeout 300000`; the default 60s is not enough for it
+1. `npm run probe -- --strict --timeout 300000 --json .probe-release.json` with the token exported.
+   Every known model and load-bearing check must pass; use `--overflow` when re-validating compaction
 2. bump `version` in `package.json`, then `npm install --package-lock-only` so the lockfile follows
-3. date the `## Unreleased` heading in `CHANGELOG.md` — the workflow lifts the release notes from the
-   section whose heading starts with the version, so a missing section means empty notes
+3. replace `## Unreleased` in `CHANGELOG.md` with `## X.Y.Z — YYYY-MM-DD` — the workflow lifts the
+   release notes from that exact version section
 4. commit, push, wait for green CI
 5. `git tag -a vX.Y.Z -m "X.Y.Z" && git push origin vX.Y.Z` — **both halves**; a tag that exists only
    locally triggers nothing, which has happened
 6. verify: `gh run view` for the steps, then `npm install pi-hetzner-inference@X.Y.Z` in a scratch dir
    and `npm audit signatures`, which must report a verified attestation
 
-`.github/workflows/release.yml` runs typecheck and tests, refuses to continue if the tag and
-`package.json` disagree, publishes with `--provenance` over OIDC (no npm token in secrets), and opens a
-GitHub Release from the changelog section. `workflow_dispatch` re-runs a failed release on an existing
-tag without moving it.
+`.github/workflows/release.yml` validates the exact tag, its commit, default-branch ancestry, and
+`package.json` version before separate check, npm publish, and GitHub Release jobs. Only the publish
+job receives OIDC; only the final job receives repository write access. Actions and npm are pinned.
+For a retry without moving the tag, dispatch against the tag ref, not the default branch:
+`gh workflow run release.yml --ref vX.Y.Z -f tag=vX.Y.Z`. Protected `v*` tags may be created only by
+the repository maintainer.
 
 Tests run TypeScript through `--experimental-strip-types`, so `.ts` extensions in imports are
 mandatory (`allowImportingTsExtensions` + `verbatimModuleSyntax` are on). `tsconfig.json` sets
@@ -65,9 +70,9 @@ worth preserving.
 | File | Role |
 | --- | --- |
 | `src/index.ts` | Factory + event handlers (`session_start`, `model_select`, `turn_end`, `after_provider_response`, `session_shutdown`) |
-| `src/provider.ts` | `providerConfig()`, `refreshModels` hook, re-registration on catalog change |
+| `src/provider.ts` | `providerConfig()`, transactional `refreshModels` publication |
 | `src/catalog.ts` | Static model table, compat flags, id → metadata merge, rate-limit constants |
-| `src/discovery.ts` | `GET /v1/models`, id-only cache with TTL, never throws |
+| `src/discovery.ts` | `GET /v1/models`, bounded id-only cache with TTL, graceful fallback |
 | `src/budget.ts` | 60s sliding window, status formatting, rate-limit header parsing |
 | `src/commands.ts` | `/hetzner status\|models\|refresh\|quiet\|ask` |
 | `src/delegate.ts` | Opt-in `hetzner_ask` tool |
@@ -80,25 +85,25 @@ worth preserving.
 about *which* models exist while `KNOWN_MODELS` in `src/catalog.ts` is authoritative about *what they
 are* (context window, modalities, notes). `mergeCatalog()` implements the four cases: known id →
 table metadata under the reported id; unknown id → conservative defaults plus a flag; documented id
-absent from the report → retired; empty/failed report → static table, so the provider is never left
-with zero models. The disk cache stores **only ids**, never metadata, so upgrading the package fixes
+absent from the report → retired; empty successful report → static table, so the provider is never
+left with zero models; failed, cancelled, or superseded refresh → preserve the current last-known-good
+catalog. The disk cache stores **only ids**, never metadata, so upgrading the package fixes
 a wrong context window immediately instead of waiting for a cache expiry.
 
 **2. Compat flags follow probe results, not guesswork.** `scripts/probe.mjs` measures what Hetzner
 does not document (function calling, forced `tool_choice`, streaming usage, base64 image input,
 rate-limit headers, overflow error phrasing). The load-bearing findings, all measured 2026-08-11:
 
-- `maxTokensField: "max_tokens"` — GLM-5.2 **rejects** `max_completion_tokens`, the other three
-  accept it. pi's default would break that model. The deployment is not uniform across models.
+- `maxTokensField: "max_tokens"` — GLM-5.2 rejected `max_completion_tokens` on one run and accepted
+  it later the same day. `max_tokens` remained stable across all four, so URL-based guessing is unsafe.
 - `contextWindow = max_model_len - maxTokens`. `max_model_len` caps input *plus requested output*, so
   advertising the full figure leaves a `maxTokens`-wide band where pi thinks a turn fits and the
   server refuses it. `maxTokens` is also clamped to half of `max_model_len`.
-- `MIN_MAX_TOKENS = 2048` — Qwen and GLM bill output tokens that never appear in the response (a
-  one-word answer cost 232 / 101 tokens with `finish_reason: "stop"` and no `reasoning_content`). A
-  small budget produced empty replies.
-- `reasoning: false`, `supportsUsageInStreaming: true`, image input only on Qwen and Kimi. Remaining
-  OpenAI-platform flags stay `false` because they were not exercised and `false` is the known-good
-  path.
+- `MIN_MAX_TOKENS = 2048` — all four return thinking under `reasoning` and bill it as output. A
+  small budget can be exhausted by thinking before any visible reply or tool call appears.
+- `reasoning: true` with a measured per-model thinking switch, `supportsUsageInStreaming: true`,
+  image input only on Qwen and Kimi. Remaining OpenAI-platform flags stay `false` because they were
+  not exercised and `false` is the known-good path.
 
 If you change a compat flag or a context window, re-run the probe and update the tables in both
 `README.md` ("Measured behaviour") and `DESIGN.md` ("Compat flags") — they are the record of *why*
@@ -130,23 +135,22 @@ headers, those are authoritative and shown in `/hetzner status`.
 
 ### Failure posture
 
-Discovery, cache reads/writes and config reads all swallow their errors and degrade rather than
-throw: a malformed config, an unwritable cache dir or an unreachable API must never break startup or
-a turn. `src/config.ts` writes `~/.pi/agent/hetzner-inference.json` (mode `0600`) and it is the only
-file this extension writes — **tokens never go there**, they live in pi's credential store.
+Discovery, cache reads/writes and config reads swallow ordinary errors and degrade rather than
+throw; caller cancellation is the exception and must propagate without replacing last-known state.
+A malformed config, an unwritable cache dir or an unreachable API must never break startup or a turn.
+The extension writes settings to `~/.pi/agent/hetzner-inference.json` and discovered model ids to
+`~/.pi/agent/cache/hetzner-inference-models.json`, both mode `0600`. **Tokens never go there**; they
+live in pi's credential store.
 
 ## Testing
 
-`npm test` is offline by construction: `test/catalog.test.ts` covers the merge (prefixed ids, unknown
-ids, retirement, dedup, ordering) and `test/budget.test.ts` covers the rate window with an injected
-clock (`usage(now)` takes the time; `RateWindow` never calls `Date.now()` itself — keep it that way).
-Anything needing the network belongs in `scripts/probe.mjs`, not in the test suite.
+`npm test` is offline by construction and covers catalog, config, discovery, delegation, event/provider
+wiring, strict-probe verdicts, and the rate window. CI also loads `src/index.ts` through the lockfile's
+real pi package with a fresh config directory, no credential, discovery disabled, and `PI_OFFLINE=1`.
+Anything needing the network belongs in `scripts/probe.mjs`, not in the test suite or CI.
 
 ## Docs to keep in sync
 
 - `README.md` — user-facing: install, commands, model table, settings, measured behaviour
-- `DESIGN.md` — rationale, the "why an extension rather than `models.json`" comparison, and **Open
-  questions** (withheld output tokens, GLM latency variance, cache pricing, publishing metadata)
-- `CHANGELOG.md` — 0.1.0 is still unreleased
-
-`package.json` has no `repository`/`homepage` yet; they must be set before `npm publish`.
+- `DESIGN.md` — rationale, the `models.json` comparison, measured compat decisions, and open questions
+- `CHANGELOG.md` — released versions and upcoming changes

@@ -9,8 +9,9 @@ Use the [Hetzner Experiments Platform Inference API](https://inference.hetzner.c
 - Optional `hetzner_ask` tool: hand bulk text work to a free model while an expensive model stays in the driver's seat
 
 > **The service is an experiment, not a product.** No SLA, no guaranteed availability, and it
-> can be changed or withdrawn at any time. Hetzner states it does not store request or response
-> content, but usage telemetry is collected. Do not put production-critical work on it.
+> can be changed or withdrawn at any time. Hetzner's [Experiments Platform documentation](https://docs.hetzner.com/general/company-and-policy/experiments/experiments-platform/)
+> says metrics are collected to evaluate experiments; its public Inference documentation does not
+> specify prompt, completion, or image retention. Do not send sensitive or production-critical data.
 
 ## Install
 
@@ -84,7 +85,8 @@ and re-check any model with `node scripts/probe.mjs --model <id> --timeout 30000
 
 `/v1/models` returns ids only, so the metadata above lives in `src/catalog.ts` and is overlaid
 onto whatever the endpoint reports. An id this package does not recognise is still registered,
-with conservative defaults (128k context, text only) and a note in `/hetzner models`.
+with conservative defaults (128k total budget, text only, with output room reserved) and a note in
+`/hetzner models`.
 
 ## Rate limits
 
@@ -113,10 +115,12 @@ available. If that changes, those headers are authoritative and `/hetzner status
 /reload
 ```
 
-Registers one tool. The main model can hand it self-contained text work — summarising a long log
-or diff, translating, extracting fields — and it answers from a free Hetzner model. The delegate
-gets no tools, no repository access and no conversation history, so everything it needs must be
-in the call.
+Registers one sequential tool. The main model can hand it self-contained text work — summarising
+a long log or diff, translating, extracting fields — and it answers from a registered Hetzner model.
+The delegate gets no tools, no repository access and no conversation history, so everything it needs
+must be in the call. `task` is limited to 4,000 characters, `input` to 1,000,000 characters, and an
+optional model id to 200 characters. Input is marked as untrusted data, and returned text is marked as
+untrusted rather than authority for consequential tool actions.
 
 Thinking is switched off for the delegate. This work is mechanical, and reasoning is billed against
 the same per-key output budget the main model is spending — so paying for a reasoning block that is
@@ -129,7 +133,8 @@ the main model is already a Hetzner one.
 ## Settings
 
 Environment variables win over `~/.pi/agent/hetzner-inference.json`, which wins over the defaults.
-The config file is the only thing this extension writes — tokens live in pi's credential store.
+The extension writes that settings file and the model-id cache described below, both with mode `0600`.
+API tokens live only in pi's credential store.
 
 | Setting | Env | Default | Meaning |
 | --- | --- | --- | --- |
@@ -142,10 +147,12 @@ The config file is the only thing this extension writes — tokens live in pi's 
 | `maxTokens` | `PI_HETZNER_MAX_TOKENS` | `32768` | Output cap advertised for every model |
 
 Discovery caches only the reported model ids, in `~/.pi/agent/cache/hetzner-inference-models.json`.
+Responses are limited to 1 MB and 1,000 models; ids are limited to 200 printable URL-safe characters.
 Metadata always comes from the current package version, so upgrading takes effect immediately
-instead of being shadowed by a stale cache. Startup performs no network I/O: the cached (or static)
-catalog is registered synchronously, and a refresh happens in the background only when the cache
-is stale.
+instead of being shadowed by a stale cache. With discovery disabled, the cache is ignored. Startup
+performs no network I/O: the static catalog is registered synchronously, and an opportunistic refresh
+runs without blocking session startup. Expected skips (disabled, offline, no token, or a fresh cache)
+are reported separately from transport, authentication, and response-shape failures.
 
 ## Measured behaviour
 
@@ -154,8 +161,9 @@ function calling, streaming usage or base64 image input — all of which decide 
 agent can use the service at all. `scripts/probe.mjs` measures them:
 
 ```bash
-HETZNER_INFERENCE_API_KEY=<token> npm run probe
-npm run probe -- --overflow          # also verifies pi's auto-compaction path (~2MB per model)
+export HETZNER_INFERENCE_API_KEY=<token>
+npm run probe -- --strict --timeout 300000 --json .probe-report.json
+npm run probe -- --strict --overflow --timeout 300000  # also requires pi's auto-compaction path (~2MB per model)
 ```
 
 Results from 2026-08-11:
@@ -177,7 +185,10 @@ Results from 2026-08-11:
 
 GLM-5.2-NVFP4 needs a longer deadline than the probe's default to be measured at all
 (`npm run probe -- --model GLM-5.2-NVFP4 --timeout 300000`); it answered a one-word prompt in 29.8s on
-the run that produced its rows above.
+the run that produced its rows above. `--strict` is the maintainer release gate: it requires every
+known model and every load-bearing capability to pass. Overflow is reported as skipped unless
+`--overflow` is requested, while timeouts and incomplete observations are inconclusive and still
+make a strict run exit nonzero. JSON reports include the measurement time and per-check verdicts.
 
 Three consequences worth knowing:
 
@@ -239,10 +250,10 @@ If all you want is the four models, `~/.pi/agent/models.json` is enough:
       "apiKey": "$HETZNER_INFERENCE_API_KEY",
       "compat": { "supportsDeveloperRole": false, "maxTokensField": "max_tokens" },
       "models": [
-        { "id": "Kimi-K2.7-Code", "contextWindow": 262144, "input": ["text", "image"] },
-        { "id": "GLM-5.2-NVFP4", "contextWindow": 512000 },
-        { "id": "DeepSeek-V4-Flash-0731", "contextWindow": 512000 },
-        { "id": "Qwen/Qwen3.6-35B-A3B-FP8", "contextWindow": 262144, "input": ["text", "image"] }
+        { "id": "Kimi-K2.7-Code", "contextWindow": 229376, "maxTokens": 32768, "input": ["text", "image"] },
+        { "id": "GLM-5.2-NVFP4", "contextWindow": 479232, "maxTokens": 32768 },
+        { "id": "DeepSeek-V4-Flash-0731", "contextWindow": 479232, "maxTokens": 32768 },
+        { "id": "Qwen/Qwen3.6-35B-A3B-FP8", "contextWindow": 229376, "maxTokens": 32768, "input": ["text", "image"] }
       ]
     }
   }
@@ -258,7 +269,8 @@ fits; do not use both for the same provider id.
 npm install
 npm run typecheck
 npm test                       # node:test, no network
-pi -e ./src/index.ts           # load without installing
+PI_OFFLINE=1 PI_HETZNER_DISCOVERY=false pi -e ./src/index.ts --list-models
+npm run probe -- --strict --timeout 300000  # live release gate; requires HETZNER_INFERENCE_API_KEY
 ```
 
 The extension has no runtime dependencies. All pi imports are type-only, and `typebox` is
