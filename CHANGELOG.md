@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 — 2026-08-16
 
 - Validate config, discovery responses, cache data, and delegated completions at their trust boundaries;
   preserve last-known-good state across failures, cancellation, superseded refreshes, and shutdown
