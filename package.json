@@ -1,6 +1,6 @@
 {
   "name": "pi-hetzner-inference",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Hetzner Experiments Platform Inference API for the pi coding agent: free open-weight models, live catalog discovery and rate-limit visibility",
   "type": "module",
   "license": "MIT",
